@@ -66,6 +66,7 @@ interface IrcPeerInfo {
 	parentId?: string;
 	unread: number;
 	lastActivity: number;
+	activity?: string;
 }
 
 export interface IrcDetails {
@@ -146,6 +147,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 				parentId: ref.parentId,
 				unread: bus.unreadCount(ref.id),
 				lastActivity: ref.lastActivity,
+				activity: ref.activity,
 			}));
 		const lines: string[] = [];
 		if (peers.length === 0) {
@@ -154,6 +156,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			lines.push(`${peers.length} peer(s):`);
 			for (const peer of peers) {
 				const extras = [
+					peer.activity || undefined,
 					peer.unread > 0 ? `unread ${peer.unread}` : undefined,
 					peer.parentId ? `parent ${peer.parentId}` : undefined,
 					`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
@@ -669,7 +672,8 @@ function renderListResult(details: Partial<IrcDetails>, expanded: boolean, theme
 				const kindText = peer.parentId ? `${peer.kind}${theme.sep.dot}of ${peer.parentId}` : peer.kind;
 				const unread = peer.unread > 0 ? ` ${formatBadge(`${peer.unread} unread`, "warning", theme)}` : "";
 				const age = messageAge(peer.lastActivity);
-				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${theme.fg("dim", kindText)}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
+				const activity = peer.activity ? ` ${theme.fg("dim", replaceTabs(peer.activity))}` : "";
+				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${theme.fg("dim", kindText)}${activity}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
 			},
 		},
 		theme,

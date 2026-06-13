@@ -34,6 +34,8 @@ export interface AgentRef {
 	sessionFile: string | null;
 	createdAt: number;
 	lastActivity: number;
+	/** Short gist of what the agent is currently doing (latest intent or tool), for the work-aware roster. Display-only. */
+	activity?: string;
 }
 
 export type RegistryEvent =
@@ -95,6 +97,17 @@ export class AgentRegistry {
 		ref.status = status;
 		ref.lastActivity = Date.now();
 		this.#emit({ type: "status_changed", ref });
+	}
+
+	/**
+	 * Record a short activity gist for the work-aware roster. Display-only and
+	 * read on demand (`irc list`, peer roster), so it emits no event — keeping
+	 * the per-tool-call update rate off the registry listener path.
+	 */
+	setActivity(id: string, activity: string): void {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.activity === activity) return;
+		ref.activity = activity;
 	}
 
 	attachSession(id: string, session: AgentSession, sessionFile?: string | null): void {

@@ -124,7 +124,10 @@ function renderIrcPeerRoster(selfId: string): string {
 		.list()
 		.filter(ref => ref.id !== selfId && ref.status !== "aborted");
 	if (peers.length === 0) return "- (no other agents)";
-	const lines = peers.map(peer => `- \`${peer.id}\` — ${peer.displayName} (${peer.kind}, ${peer.status})`);
+	const lines = peers.map(
+		peer =>
+			`- \`${peer.id}\` — ${peer.displayName} (${peer.kind}, ${peer.status})${peer.activity ? `: ${peer.activity}` : ""}`,
+	);
 	if (peers.some(peer => peer.status === "idle" || peer.status === "parked")) {
 		lines.push("Idle/parked peers are not gone: messaging them wakes (or revives) them.");
 	}
@@ -832,6 +835,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const emitProgressNow = () => {
 		progress.durationMs = Date.now() - startTime;
 		onProgress?.({ ...progress });
+		const activityGist =
+			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
+		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
 		if (args.eventBus) {
 			args.eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
 				index,
