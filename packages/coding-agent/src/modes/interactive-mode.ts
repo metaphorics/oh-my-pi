@@ -69,6 +69,11 @@ import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
 import {
+	formatMCPConnectingMessage,
+	MCP_CONNECTING_EVENT_CHANNEL,
+	type McpConnectingEvent,
+} from "../mcp/startup-events";
+import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
 	resolveApprovedPlan,
@@ -506,6 +511,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(LSP_STARTUP_EVENT_CHANNEL, data => {
 					this.#handleLspStartupEvent(data as LspStartupEvent);
+				}),
+			);
+			this.#eventBusUnsubscribers.push(
+				eventBus.on(MCP_CONNECTING_EVENT_CHANNEL, data => {
+					this.showStatus(formatMCPConnectingMessage((data as McpConnectingEvent).serverNames));
 				}),
 			);
 		}
