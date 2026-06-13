@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added an always-on `LoopWatchdog` armed in `TUI.start()`/`TUI.stop()` that logs `ui.loop-blocked` (rising-edge deduped, with `blockedMs` and the current loop phase) when a self-scheduled probe tick runs late, plus a `ui.select-filter` breadcrumb around the `SelectList` fuzzy filter, so intermittent main-thread stalls become attributable in the logs ([#2485](https://github.com/can1357/oh-my-pi/issues/2485))
 
 ## [15.12.5] - 2026-06-13
 ### Added

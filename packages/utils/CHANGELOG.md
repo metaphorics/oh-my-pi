@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a lightweight loop-phase breadcrumb stack (`pushLoopPhase`/`popLoopPhase`/`currentLoopPhase`) so the TUI event-loop watchdog can attribute a main-thread block to the phase that caused it ([#2485](https://github.com/can1357/oh-my-pi/issues/2485))
 
 ## [15.12.4] - 2026-06-13
 
