@@ -366,6 +366,24 @@ export function buildSpecializationAdvisory(
 	);
 }
 
+/**
+ * Suggestion — never a rejection — nudging the spawner to coordinate via `irc`
+ * when one call creates ≥2 live siblings and it still holds spawn capacity.
+ * Returns undefined when there is nothing to coordinate or IRC is unavailable.
+ */
+export function buildCoordinationAdvisory(
+	items: TaskItem[],
+	depthCapacity: boolean,
+	ircEnabled: boolean,
+): string | undefined {
+	if (!depthCapacity || !ircEnabled || items.length < 2) return undefined;
+	return (
+		`Coordinate: ${items.length} siblings are running together. If their work overlaps, have them ` +
+		`message each other via \`irc\` (by id, or "all" to broadcast) before editing shared files — ` +
+		`live coordination beats a serial handoff. Check \`irc\` op:"list" to see who is doing what.`
+	);
+}
+
 /** Sentinel for async jobs whose subagent finished with a failing result; progress is already updated. */
 class TaskJobError extends Error {}
 
@@ -533,7 +551,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.settings.get("task.maxRecursionDepth") ?? 2,
 			this.session.taskDepth ?? 0,
 		);
-		const advisory = buildSpecializationAdvisory(params.agent, spawnItems, depthCapacity);
+		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
+		// Coordination only makes sense when the siblings keep running after this
+		// call returns (async). In the sync fallback they have already completed,
+		// so a "coordinate while they run" hint would misfire.
+		const willRunAsync = !!manager && selectedAgent?.blocking !== true;
+		const advisory =
+			[
+				buildSpecializationAdvisory(params.agent, spawnItems, depthCapacity),
+				willRunAsync ? buildCoordinationAdvisory(spawnItems, depthCapacity, ircEnabled) : undefined,
+			]
+				.filter(Boolean)
+				.join("\n\n") || undefined;
 		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
 			if (!advisory) return result;
 			const textPart = result.content.find(part => part.type === "text");
@@ -608,7 +637,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			},
 		});
 
-		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
 		const started: Array<{ agentId: string; jobId: string; description?: string }> = [];
 		const failedSchedules: string[] = [];
 		for (const spawn of spawns) {
