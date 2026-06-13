@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the tool-result renderer re-shaping on every `invalidate()` (spinner tick, stream chunk, resize, keystroke), which made large grep/find/read results block the main thread for seconds and made typing sluggish. `ToolExecutionComponent.#updateDisplay()` now memoizes on a dirty key (result version, expanded, partial, spinner frame, image visibility, theme epoch) so the O(result-size) `renderResult` shaping runs once per change instead of every frame ([#2484](https://github.com/can1357/oh-my-pi/issues/2484))
+
 ## [15.12.5] - 2026-06-13
 ### Changed
 

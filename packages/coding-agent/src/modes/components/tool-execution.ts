@@ -16,7 +16,7 @@ import {
 import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
-import { theme } from "../../modes/theme/theme";
+import { getThemeEpoch, theme } from "../../modes/theme/theme";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
 import { isWaitingPollDetails } from "../../tools/job";
@@ -176,6 +176,8 @@ export class ToolExecutionComponent extends Container {
 	#editAllowFuzzy: boolean | undefined;
 	#snapshots?: SnapshotStore;
 	#isPartial = true;
+	#resultVersion = 0;
+	#lastDisplayKey: string | undefined;
 	#tool?: AgentTool;
 	#ui: TUI;
 	#cwd: string;
@@ -393,6 +395,7 @@ export class ToolExecutionComponent extends Container {
 			return;
 		}
 		this.#result = result;
+		this.#resultVersion++;
 		this.#isPartial = isPartial;
 		// A `job` poll that found every watched job still running is transient
 		// "still waiting" chrome; keep the block displaceable so the next `job`
@@ -674,6 +677,14 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	#updateDisplay(): void {
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}`;
+		if (key === this.#lastDisplayKey && this.#contentBox.children.length > 0) return;
+		this.#lastDisplayKey = key;
+
+		this.#rebuildDisplay();
+	}
+
+	#rebuildDisplay(): void {
 		// Sync shared mutable render state for component closures
 		this.#renderState.expanded = this.#expanded;
 		this.#renderState.isPartial = this.#isPartial;
