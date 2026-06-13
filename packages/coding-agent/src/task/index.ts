@@ -310,7 +310,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-	return [{ id: params.id, description: params.description, assignment: params.assignment }];
+	return [{ id: params.id, description: params.description, role: params.role, assignment: params.assignment }];
 }
 
 /**
@@ -324,6 +324,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): TaskParams {
 	const spawn: TaskParams = { agent: params.agent };
 	if (item.id !== undefined) spawn.id = item.id;
 	if (item.description !== undefined) spawn.description = item.description;
+	if (item.role !== undefined) spawn.role = item.role;
 	if (item.assignment !== undefined) spawn.assignment = item.assignment;
 	if (params.context !== undefined) spawn.context = params.context;
 	if (item.isolated !== undefined) {
@@ -1143,6 +1144,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context: sharedContext,
 				planReference,
 				description: params.description,
+				role: params.role,
 				index: spawnIndex,
 				parentToolCallId: toolCallId,
 				id: agentId,

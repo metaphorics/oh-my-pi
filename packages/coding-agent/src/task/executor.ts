@@ -57,6 +57,7 @@ import {
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	type ReviewFinding,
+	resolveSubagentDisplayName,
 	type SingleResult,
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -192,6 +193,8 @@ export interface ExecutorOptions {
 	 */
 	planReference?: { path: string; content: string };
 	description?: string;
+	/** Specialist role/expertise for this spawn; drives the system-prompt preamble, display name, and telemetry identity. */
+	role?: string;
 	index: number;
 	id: string;
 	parentToolCallId?: string;
@@ -1607,6 +1610,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
 	);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
+	// Tailored specialist identity for this spawn. `subagentRole` is the full
+	// (trimmed) role text fed to the system-prompt preamble; `subagentDisplayName`
+	// is the label-normalized form the registry/roster show, falling back to the
+	// agent type name when no role was given.
+	const subagentRole = options.role?.trim() || undefined;
+	const subagentDisplayName = resolveSubagentDisplayName(options.role, agent.name);
 	const maxRuntimeMs = Math.max(
 		0,
 		Math.trunc(Number(options.maxRuntimeMs ?? settings.get("task.maxRuntimeMs") ?? 0) || 0),
@@ -1804,7 +1813,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// carry the subagent's own agent identity, and use the subagent's
 			// own session id for `gen_ai.conversation.id`.
 			const subagentAgentIdentity: AgentIdentity | undefined = options.parentTelemetry
-				? { id, name: agent.name, description: agent.description }
+				? { id, name: subagentDisplayName, description: subagentRole ?? agent.description }
 				: undefined;
 			const subagentTelemetry: AgentTelemetryConfig | undefined =
 				options.parentTelemetry && subagentAgentIdentity
@@ -1854,6 +1863,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				systemPrompt: defaultPrompt => {
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
+						role: subagentRole ?? "",
 						context: options.context?.trim() ?? "",
 						planReference: options.planReference?.content ?? "",
 						planReferencePath: options.planReference?.path ?? "",
@@ -1874,7 +1884,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 				parentTaskPrefix: id,
 				agentId: id,
-				agentDisplayName: agent.name,
+				agentDisplayName: subagentDisplayName,
 				enableLsp: lspEnabled,
 				skipPythonPreflight,
 				enableMCP,

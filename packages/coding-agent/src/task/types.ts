@@ -74,6 +74,12 @@ export interface SubagentLifecyclePayload {
 const taskItemShape = {
 	id: z.string().max(48).optional().describe("stable agent id; default generated"),
 	description: z.string().optional().describe("ui label, not seen by subagent"),
+	role: z
+		.string()
+		.optional()
+		.describe(
+			"specialist role/expertise this subagent embodies (e.g. 'Rust async-runtime specialist'); shapes its identity and display name",
+		),
 	assignment: z.string().describe("the work; self-contained instructions"),
 };
 const isolatedShape = {
@@ -95,6 +101,8 @@ export interface TaskItem {
 	id?: string;
 	/** UI label, not seen by the subagent. */
 	description?: string;
+	/** Specialist role/expertise this subagent embodies; shapes its system-prompt identity and display name. */
+	role?: string;
 	/** The work; required by the schema. */
 	assignment?: string;
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
@@ -140,6 +148,8 @@ export interface TaskParams {
 	id?: string;
 	/** UI label (flat form), not seen by the subagent. */
 	description?: string;
+	/** Specialist role/expertise this subagent embodies; shapes its system-prompt identity and display name. */
+	role?: string;
 	/** The work (flat form). */
 	assignment?: string;
 	/** Batch form (`task.batch`): one subagent per item. */
@@ -148,6 +158,26 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+}
+
+/**
+ * One-line, length-capped label derived from a spawn's `role`, safe for the
+ * registry `displayName` and the IRC roster (collapses whitespace/newlines so
+ * a multi-line role can't break a single roster line).
+ */
+export function subagentRoleLabel(role: string): string {
+	const oneLine = role.replace(/\s+/g, " ").trim();
+	return oneLine.length > 80 ? `${oneLine.slice(0, 79)}…` : oneLine;
+}
+
+/**
+ * Display name for a spawned subagent: its tailored `role` (label-normalized)
+ * when one is given, else the agent type's name. Empty/whitespace roles fall
+ * back to the agent name.
+ */
+export function resolveSubagentDisplayName(role: string | undefined, agentName: string): string {
+	const trimmed = role?.trim();
+	return trimmed ? subagentRoleLabel(trimmed) : agentName;
 }
 
 /** A code review finding reported by the reviewer agent */
