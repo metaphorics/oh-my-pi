@@ -222,6 +222,41 @@ function rangeTextFingerprint(lines: string[], startLine: number, endLine: numbe
 		.digest("base64url");
 }
 
+function selectorStructuralKey(name: string, kind: string, container: string | undefined): string {
+	return `${name}\0${kind}\0${container ?? ""}`;
+}
+
+function selectorBucketKey(name: string, kind: string, container: string | undefined, fingerprint: string): string {
+	return `${selectorStructuralKey(name, kind, container)}\0${fingerprint}`;
+}
+
+interface ResolvedSelectorInput {
+	symbol: SymbolEntry;
+	symbolIndex: number;
+	relPath: string;
+	sourceAddress: string;
+	lang: string | undefined;
+	container: string | undefined;
+	fingerprint: string;
+	bucketSize: number;
+}
+
+function encodeResolvedSelector(input: ResolvedSelectorInput): string | undefined {
+	if (input.bucketSize > 1) return "ambiguous";
+	const { symbol } = input;
+	return encodeSelector({
+		a: input.sourceAddress,
+		p: input.relPath,
+		g: input.lang,
+		n: symbol.name,
+		k: symbol.kind,
+		c: input.container,
+		f: input.fingerprint,
+		o: input.symbolIndex,
+		l: symbol.selectionLine,
+	});
+}
+
 /** Encode a selector payload into the `sym:v1:<base64url>` envelope. */
 function encodeSelector(payload: SelectorPayload): string {
 	const json = JSON.stringify(payload);
@@ -265,11 +300,10 @@ function decodeSelector(raw: string): SelectorPayload | string {
 	}
 }
 
-/** Pre-computed per-file selector data: splits code once, fingerprints every
- *  symbol once, builds the structural bucket map once. Container is included
- *  in the bucket key so distinct-container siblings are not falsely ambiguous. */
+/** Pre-computed per-file selector data: fingerprints every symbol once and
+ *  builds the structural bucket map once. Container is included in the bucket
+ *  key so distinct-container siblings are not falsely ambiguous. */
 interface FileSelectorCache {
-	lines: string[];
 	/** Fingerprint per symbol index. */
 	fingerprints: string[];
 	/** Structural+container+fingerprint bucket key → count. */
@@ -286,11 +320,11 @@ function buildFileSelectorCache(symbols: SymbolEntry[], code: string): FileSelec
 		const s = symbols[i]!;
 		const fp = rangeTextFingerprint(lines, s.startLine, s.endLine);
 		fingerprints[i] = fp;
-		const container = s.container ?? (s.parent >= 0 ? symbols[s.parent]?.name : undefined) ?? "";
-		const key = `${s.name}\0${s.kind}\0${container}\0${fp}`;
+		const container = resolveContainer(s, symbols);
+		const key = selectorBucketKey(s.name, s.kind, container, fp);
 		buckets.set(key, (buckets.get(key) ?? 0) + 1);
 	}
-	return { lines, fingerprints, buckets };
+	return { fingerprints, buckets };
 }
 
 /** Encode a selector for a symbol if it is uniquely addressable (structural
@@ -308,20 +342,89 @@ function maybeEncodeSymbolSelector(
 ): string | undefined {
 	const container = resolveContainer(s, symbols);
 	const fp = cache.fingerprints[symbolIndex]!;
-	const bucketContainer = container ?? "";
-	const bucketKey = `${s.name}\0${s.kind}\0${bucketContainer}\0${fp}`;
-	const bucketSize = cache.buckets.get(bucketKey) ?? 0;
-	if (bucketSize > 1) return "ambiguous";
-	return encodeSelector({
-		a: sourceAddress,
-		p: relPath,
-		g: lang,
-		n: s.name,
-		k: s.kind,
-		c: container,
-		f: fp,
-		o: symbolIndex,
-		l: s.selectionLine,
+	const bucketSize = cache.buckets.get(selectorBucketKey(s.name, s.kind, container, fp)) ?? 0;
+	return encodeResolvedSelector({
+		symbol: s,
+		symbolIndex,
+		relPath,
+		sourceAddress,
+		lang,
+		container,
+		fingerprint: fp,
+		bucketSize,
+	});
+}
+
+/** Per-file selector data computed lazily for visible symbols only.
+ *  Fingerprints and bucket counts are limited to symbols sharing a structural
+ *  key (name/kind/container) with at least one visible symbol. */
+interface VisibleSelectorContext {
+	/** Fingerprint per symbol index, populated only for symbols whose structural
+	 *  key appears among visible matches. */
+	fingerprints: Map<number, string>;
+	/** Structural+container+fingerprint bucket key → count. */
+	buckets: Map<string, number>;
+}
+
+/** Build selector contexts for the visible matches, one per file. Fingerprints
+ *  are computed only for visible symbols and same-key siblings, preserving the
+ *  original ambiguity semantics without hashing every symbol in every candidate
+ *  file before filters and pagination run. */
+function buildVisibleSelectorContexts(visible: MatchedSymbol[]): Map<string, VisibleSelectorContext> {
+	const contexts = new Map<string, VisibleSelectorContext>();
+	const byFile = new Map<string, { code: string; symbols: SymbolEntry[]; neededKeys: Set<string> }>();
+	for (const m of visible) {
+		let file = byFile.get(m.absPath);
+		if (file === undefined) {
+			file = { code: m.code, symbols: m.symbols, neededKeys: new Set<string>() };
+			byFile.set(m.absPath, file);
+		}
+		file.neededKeys.add(selectorStructuralKey(m.symbol.name, m.symbol.kind, m.container));
+	}
+
+	for (const [absPath, { code, symbols, neededKeys }] of byFile) {
+		const lines = code.split("\n");
+
+		const fingerprints = new Map<number, string>();
+		const buckets = new Map<string, number>();
+		for (let i = 0; i < symbols.length; i++) {
+			const s = symbols[i]!;
+			const container = resolveContainer(s, symbols);
+			const key = selectorStructuralKey(s.name, s.kind, container);
+			if (!neededKeys.has(key)) continue;
+			const fp = rangeTextFingerprint(lines, s.startLine, s.endLine);
+			fingerprints.set(i, fp);
+			const bucketKey = selectorBucketKey(s.name, s.kind, container, fp);
+			buckets.set(bucketKey, (buckets.get(bucketKey) ?? 0) + 1);
+		}
+
+		contexts.set(absPath, { fingerprints, buckets });
+	}
+	return contexts;
+}
+
+/** Encode a selector for a visible symbol using its file context. Returns the
+ *  encoded selector string, "ambiguous" if byte-identical structural+fingerprint
+ *  siblings exist, or undefined on unexpected error. */
+function encodeVisibleSelector(
+	m: MatchedSymbol,
+	ctx: VisibleSelectorContext,
+	sourceAddress: string,
+	lang: string | undefined,
+): string | undefined {
+	const s = m.symbol;
+	const fp = ctx.fingerprints.get(m.symbolIndex);
+	if (fp === undefined) return undefined;
+	const bucketSize = ctx.buckets.get(selectorBucketKey(s.name, s.kind, m.container, fp)) ?? 0;
+	return encodeResolvedSelector({
+		symbol: s,
+		symbolIndex: m.symbolIndex,
+		relPath: m.relPath,
+		sourceAddress,
+		lang,
+		container: m.container,
+		fingerprint: fp,
+		bucketSize,
 	});
 }
 
@@ -551,6 +654,8 @@ interface MatchedSymbol {
 	code: string;
 	symbolIndex: number;
 	container: string | undefined;
+	/** Full symbol array for this file; used for deferred selector computation. */
+	symbols: SymbolEntry[];
 }
 
 /** Container resolution: prefer the extractor's `container`, else the parent symbol's name. */
@@ -806,9 +911,8 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		return untilAborted(signal, async () => {
 			const cwd = this.session.cwd;
 
-			// U3: Decode selector before path normalization so the embedded source
-			// address and language context become the effective target. Selector mode
-			// was already validated (no explicit path/name/kind/container/line).
+			// Decode selector before path normalization so the embedded source
+			// address and language context become the effective target.
 			let effectiveParams = params;
 			if (params.selector !== undefined) {
 				const decoded = decodeSelector(params.selector);
@@ -1097,9 +1201,6 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		// matches the name exactly, so an exact hit is never buried under noise.
 		const exact: MatchedSymbol[] = [];
 		const substring: MatchedSymbol[] = [];
-		// Per-file selector cache: built once from the SAME symbols array used for
-		// matching, so symbolIndex is a stable reference into that array.
-		const selCacheByAbs = new Map<string, { symbols: SymbolEntry[]; cache: FileSelectorCache }>();
 		for (const abs of candidates) {
 			const cached = contentCache.get(abs);
 			let code: string;
@@ -1116,19 +1217,16 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				symbols = outlineFromCode(code, abs, params.lang);
 			}
 			const relPath = formatPathRelativeToCwd(abs, cwd);
-			// Build selector cache from THIS symbols array (once per file).
-			if (!selCacheByAbs.has(abs)) {
-				selCacheByAbs.set(abs, { symbols, cache: buildFileSelectorCache(symbols, code) });
-			}
 			for (let i = 0; i < symbols.length; i++) {
 				const s = symbols[i]!;
-				const entry = {
+				const entry: MatchedSymbol = {
 					symbol: s,
 					relPath,
 					absPath: abs,
 					code,
 					symbolIndex: i,
 					container: resolveContainer(s, symbols),
+					symbols,
 				};
 				if (s.name === name) {
 					exact.push(entry);
@@ -1137,7 +1235,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				}
 			}
 		}
-		// U4: Apply kind/container filters before exact-vs-substring selection.
+		// Apply kind/container filters before exact-vs-substring selection.
 		const applyFilters = (items: MatchedSymbol[]): MatchedSymbol[] => {
 			let result = items;
 			if (params.kind !== undefined) {
@@ -1169,9 +1267,13 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		const visible = matched.slice(skip, skip + limit);
 		const remaining = matched.length - (skip + limit);
 
+		// Compute selector data only for visible matches and same-key siblings.
+		const selectorContexts = buildVisibleSelectorContexts(visible);
+
 		const modelLines: string[] = [`Found ${matched.length} symbol(s) matching "${name}":`];
 		const displayLines: string[] = [`Found ${matched.length} symbol(s) matching "${name}":`];
-		for (const { symbol: s, relPath, absPath, symbolIndex, container } of visible) {
+		for (const m of visible) {
+			const { symbol: s, relPath, absPath, container } = m;
 			const containerSuffix = container ? ` (${container})` : "";
 			const baseModel = `${s.kind} ${s.name}${containerSuffix} @ ${relPath}:${s.selectionLine}`;
 			const baseDisplay = `${kindIcon(s.kind)} ${s.name}${containerSuffix} @ ${relPath}:${s.selectionLine}`;
@@ -1181,18 +1283,8 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				modelLines.push(`${baseModel} selector=${SELECTOR_SUPPRESSED_INTERNAL}`);
 				displayLines.push(`${baseDisplay} selector=${SELECTOR_SUPPRESSED_INTERNAL}`);
 			} else {
-				const selEntry = selCacheByAbs.get(absPath);
-				const sel = selEntry
-					? maybeEncodeSymbolSelector(
-							s,
-							selEntry.symbols,
-							symbolIndex,
-							relPath,
-							sourceAddress,
-							params.lang,
-							selEntry.cache,
-						)
-					: undefined;
+				const ctx = selectorContexts.get(absPath);
+				const sel = ctx ? encodeVisibleSelector(m, ctx, sourceAddress, params.lang) : undefined;
 				if (sel === "ambiguous") {
 					modelLines.push(`${baseModel} selector=ambiguous`);
 					displayLines.push(`${baseDisplay} selector=ambiguous`);
@@ -1270,7 +1362,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		let selectorPayload: SelectorPayload | undefined;
 
 		if (rawSelector !== undefined) {
-			// U3: Selector mode — resolve by structural fields + fingerprint.
+			// Resolve selector mode by structural fields + fingerprint.
 			if (!name) throw new ToolError("`name` is required for manipulate");
 			const decoded = decodeSelector(rawSelector);
 			if (typeof decoded === "string") throw new ToolError(decoded);
@@ -1312,10 +1404,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		}
 		// Capture the symbol's source text now so the apply can reject if the body
 		// changed since the preview even when the line range is unchanged.
-		const previewRangeText = code
-			.split("\n")
-			.slice(startLine - 1, endLine)
-			.join("\n");
+		const previewRangeText = canonicalRangeText(code.split("\n"), startLine, endLine);
 
 		const tag = await recordFileSnapshot(this.session, abs);
 		if (!tag) throw new ToolError(`Cannot snapshot ${relPath} for editing (file too large or unreadable)`);
@@ -1394,10 +1483,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 						isError: true,
 					};
 				}
-				const freshRangeText = freshCode
-					.split("\n")
-					.slice(fresh.startLine - 1, fresh.endLine)
-					.join("\n");
+				const freshRangeText = canonicalRangeText(freshCode.split("\n"), fresh.startLine, fresh.endLine);
 				if (freshRangeText !== previewRangeText) {
 					return {
 						...toolResult(details)
