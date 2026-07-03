@@ -23,7 +23,7 @@ export interface PipelineOptions {
 	settings?: Settings;
 }
 
-export interface PipelineProgress {
+interface PipelineProgress {
 	iteration: number;
 	targetCount: number;
 	currentWave: number;

@@ -13,7 +13,7 @@
  */
 import type { ComponentType } from "react";
 
-export interface ToolResultText {
+interface ToolResultText {
 	type: "text";
 	text: string;
 }

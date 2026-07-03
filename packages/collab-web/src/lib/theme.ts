@@ -50,7 +50,7 @@ if (typeof window !== "undefined") {
 	});
 }
 
-export function setThemePreference(next: ThemePreference): void {
+function setThemePreference(next: ThemePreference): void {
 	preference = next;
 	try {
 		globalThis.localStorage.setItem(STORAGE_KEY, next);
@@ -64,15 +64,6 @@ export function setThemePreference(next: ThemePreference): void {
 function subscribe(callback: () => void): () => void {
 	listeners.add(callback);
 	return () => listeners.delete(callback);
-}
-
-/** Reader for the active resolved theme. Reflects system default and overrides. */
-export function useSystemTheme(): SystemTheme {
-	return useSyncExternalStore(
-		subscribe,
-		() => resolved,
-		() => "dark" as SystemTheme,
-	);
 }
 
 /** Reader + writer for the theme preference (powers the toggle). */

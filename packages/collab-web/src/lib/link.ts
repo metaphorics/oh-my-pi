@@ -19,7 +19,7 @@ import {
 
 export { COLLAB_PROTO } from "@oh-my-pi/pi-wire";
 export type { ParsedCollabLink };
-export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
+export { DEFAULT_RELAY_URL };
 
 const ROOM_PATH_RE = /^\/r\/([A-Za-z0-9_-]{10,64})(?:\.([A-Za-z0-9_-]+))?$/;
 const BARE_LINK_RE = /^([A-Za-z0-9_-]{10,64})[#.]([A-Za-z0-9_-]+)$/;

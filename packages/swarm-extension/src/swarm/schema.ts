@@ -24,7 +24,7 @@ interface RawSwarmConfig {
 // Normalized types (camelCase, defaults applied)
 // ============================================================================
 
-export type SwarmMode = "pipeline" | "parallel" | "sequential";
+type SwarmMode = "pipeline" | "parallel" | "sequential";
 
 export interface SwarmAgent {
 	name: string;
