@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Corrected the stale `package.json` version (`15.11.7` → `16.3.4`) to match the current release line. ([#4548](https://github.com/can1357/oh-my-pi/pull/4548))
+
 ## [16.3.3] - 2026-07-02
 
 ### Fixed
