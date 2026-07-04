@@ -1,0 +1,18 @@
+# Dev-only fixture corpus shared by the grep engine contract/parity suite
+# (T10). Both pi-uu-grep's integration tests and pi-natives' in-crate tests
+# depend on this so every engine sees byte-identical inputs. Not published; it
+# carries no production code.
+[package]
+name = "pi-grep-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -3003,6 +3003,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-grep-testkit"
+version = "16.3.4"
+
+[[package]]
 name = "pi-iso"
 version = "16.3.4"
 dependencies = [
@@ -3039,6 +3043,7 @@ dependencies = [
  "parking_lot",
  "phf 0.13.1",
  "pi-ast",
+ "pi-grep-testkit",
  "pi-iso",
  "pi-shell",
  "pi-uutils-ctx",
@@ -3126,6 +3131,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "parking_lot",
+ "pi-grep-testkit",
  "pi-uutils-ctx",
  "pi-walker",
 ]

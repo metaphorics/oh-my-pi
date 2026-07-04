@@ -2109,6 +2109,226 @@ mod tests {
 		}
 	}
 
+	// -----------------------------------------------------------------
+	// T10 contract/parity cases.
+	//
+	// Pins the pi-natives engine's observable behavior against the shared
+	// `pi_grep_testkit` corpus that also drives pi-uu-grep's `grep`/`rg`
+	// contract suite. `contract:` marks behavior the relevant engines agree
+	// on; `parity-gap:` marks a discovered disagreement recorded for T11/T12.
+	// See `.outline/sdd/t10-report.md`.
+	// -----------------------------------------------------------------
+	use pi_grep_testkit as fx;
+
+	fn search_opts(pattern: &str) -> super::SearchOptions {
+		super::SearchOptions {
+			pattern:        pattern.to_string(),
+			ignore_case:    None,
+			multiline:      None,
+			max_count:      None,
+			offset:         None,
+			context_before: None,
+			context_after:  None,
+			context:        None,
+			max_columns:    None,
+			mode:           None,
+		}
+	}
+
+	fn matched_lines(result: &super::SearchResult) -> Vec<(u32, String)> {
+		result
+			.matches
+			.iter()
+			.map(|matched| (matched.line_number, matched.line.clone()))
+			.collect()
+	}
+
+	#[test]
+	fn contract_case_insensitive_unicode_folds() {
+		// contract: case-insensitive search folds Unicode case (é ↔ É).
+		let sensitive = super::search_sync(fx::UNICODE.as_bytes(), search_opts("café"));
+		assert_eq!(sensitive.match_count, 1);
+		let mut opts = search_opts("café");
+		opts.ignore_case = Some(true);
+		let insensitive = super::search_sync(fx::UNICODE.as_bytes(), opts);
+		assert_eq!(insensitive.match_count, 2);
+	}
+
+	#[test]
+	fn contract_unicode_property_class() {
+		// contract: \p{Greek} matches the Greek line, agreed by grep/rg/pi-natives.
+		let result = super::search_sync(fx::UNICODE.as_bytes(), search_opts(r"\p{Greek}"));
+		assert_eq!(matched_lines(&result), [(3, "Ωmega".to_string())]);
+	}
+
+	#[test]
+	fn contract_multiline_off_then_on() {
+		// contract (pi-natives ↔ rg): a \n-bearing pattern only matches across
+		// lines under multiline mode.
+		let off = super::search_sync(fx::MULTILINE.as_bytes(), search_opts("foo\nbar"));
+		assert_eq!(off.match_count, 0, "line scanner never sees the terminator");
+		let mut opts = search_opts("foo\nbar");
+		opts.multiline = Some(true);
+		let on = super::search_sync(fx::MULTILINE.as_bytes(), opts);
+		assert_eq!(matched_lines(&on), [(1, "foo\nbar".to_string())]);
+	}
+
+	#[test]
+	fn contract_context_before_after_both() {
+		// contract: context windows attach the adjacent lines to the match.
+		let mut opts = search_opts(fx::CONTEXT_PATTERN);
+		opts.context = Some(1);
+		let result = super::search_sync(fx::CONTEXT.as_bytes(), opts);
+		assert_eq!(result.matches.len(), 1);
+		let matched = &result.matches[0];
+		assert_eq!(matched.line_number, 3);
+		let before = matched.context_before.as_ref().expect("before context");
+		let after = matched.context_after.as_ref().expect("after context");
+		assert_eq!((before[0].line_number, before[0].line.as_str()), (2, "L2"));
+		assert_eq!((after[0].line_number, after[0].line.as_str()), (4, "L4"));
+	}
+
+	#[test]
+	fn contract_crlf_middle_line() {
+		// contract: a match on a CRLF-terminated middle line lands at line 2;
+		// pi-natives trims the trailing CR from the reported line.
+		let result = super::search_sync(b"one\r\ntwo\r\nthree\r\n", search_opts("two"));
+		assert_eq!(matched_lines(&result), [(2, "two".to_string())]);
+	}
+
+	#[test]
+	fn contract_latin1_ascii_match() {
+		// contract: an invalid-UTF-8 Latin-1 byte earlier on the line does not
+		// block a contiguous ASCII match.
+		let result = super::search_sync(&fx::latin1_line(), search_opts("needle"));
+		assert_eq!(result.match_count, 1);
+		assert_eq!(result.matches[0].line_number, 1);
+	}
+
+	#[test]
+	fn contract_utf16_bom_transcoded() {
+		// contract: default BOM sniffing transcodes UTF-16LE so an ASCII pattern
+		// matches, agreed by grep/rg/pi-natives.
+		let result = super::search_sync(&fx::utf16le_bom("needle\n"), search_opts("needle"));
+		assert_eq!(matched_lines(&result), [(1, "needle".to_string())]);
+	}
+
+	#[test]
+	fn contract_count_mode_counts_matching_lines() {
+		// contract (pi-natives ↔ grep -c): count mode counts matching lines, not
+		// occurrences (rg --count-matches counts occurrences — a separate mode).
+		let mut opts = search_opts("beta");
+		opts.mode = Some(super::GrepOutputMode::Count);
+		let result = super::search_sync(b"beta beta\nno\nbeta\n", opts);
+		assert_eq!(result.match_count, 2, "two lines match, three occurrences");
+	}
+
+	#[test]
+	fn contract_max_count_caps_matches() {
+		// contract (pi-natives ↔ grep/rg -m): max_count caps the number of
+		// matching lines returned (first-match early exit).
+		let mut opts = search_opts("beta");
+		opts.max_count = Some(1);
+		let result = super::search_sync(b"beta one\nbeta two\nbeta three\n", opts);
+		assert_eq!(matched_lines(&result), [(1, "beta one".to_string())]);
+	}
+
+	#[test]
+	fn parity_gap_nul_quit_reports_zero() {
+		// parity-gap: pi-natives always uses quit-on-NUL binary detection, so a
+		// file with an interior NUL yields zero matches — even for text before
+		// the NUL. Over a single file, rg (convert) and grep (none) both scan
+		// through and report two matches. Cross-engine note lives in
+		// pi-uu-grep's parity_gaps::single_file_nul_binary_policy_*.
+		let result = super::search_sync(&fx::nul_binary(), search_opts("needle"));
+		assert_eq!(result.match_count, 0);
+	}
+
+	#[test]
+	fn parity_gap_invalid_regex_literal_fallback() {
+		// parity-gap: pi-natives (like grep) matches an unparseable pattern
+		// literally; rg rejects it with exit 2. Pins the fallback for T11/T12.
+		let result = super::search_sync(b"a fail) b\nok\n", search_opts("fail)"));
+		assert_eq!(matched_lines(&result), [(1, "a fail) b".to_string())]);
+	}
+
+	#[test]
+	fn parity_gap_max_columns_truncates_with_ellipsis() {
+		// parity-gap: pi-natives truncates an over-long matching line to N chars
+		// with a trailing ellipsis and sets `truncated`; rg emits a placeholder
+		// line ("[Omitted long matching line]") instead.
+		let mut opts = search_opts("needle");
+		opts.max_columns = Some(10);
+		let result = super::search_sync(fx::long_line().as_bytes(), opts);
+		assert_eq!(result.matches.len(), 1);
+		assert!(result.matches[0].line.ends_with("..."));
+		assert_eq!(result.matches[0].truncated, Some(true));
+	}
+
+	#[cfg(unix)]
+	fn walk_config(path: &Path, pattern: &str) -> GrepConfig {
+		GrepConfig {
+			pattern:            pattern.to_string(),
+			path:               path.to_string_lossy().into_owned(),
+			glob:               None,
+			type_filter:        None,
+			ignore_case:        None,
+			multiline:          None,
+			hidden:             None,
+			gitignore:          None,
+			max_count:          None,
+			offset:             None,
+			context_before:     None,
+			context_after:      None,
+			context:            None,
+			max_columns:        None,
+			mode:               None,
+			max_count_per_file: None,
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn walk_respects_gitignore_but_includes_hidden_by_default() {
+		// contract (pi-natives ↔ rg on gitignore): the .gitignore'd file is
+		// skipped by default. parity-gap on hidden: pi-natives INCLUDES hidden
+		// files by default, whereas rg excludes them (see pi-uu-grep
+		// parity_gaps::hidden_files_default_*).
+		let tree = fx::walk_corpus("pn-walk-default");
+		let result =
+			grep_sync(walk_config(tree.path(), "needle"), None, task::CancelToken::default())
+				.expect("directory grep should succeed");
+
+		let mut paths: Vec<&str> = result.matches.iter().map(|m| m.path.as_str()).collect();
+		paths.sort_unstable();
+		assert_eq!(
+			paths,
+			[".hidden.txt", "a.txt", "b.txt", "sub/c.txt"],
+			"gitignored file excluded (contract); hidden file included (parity-gap vs rg)"
+		);
+		assert_eq!(result.files_with_matches, 4);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn walk_does_not_follow_symlinks_by_default() {
+		// contract: a symlink to a file is not traversed, so the target's
+		// content is searched exactly once.
+		let tree = fx::TempTree::new("pn-symlink");
+		tree.write("target.txt", b"needle here\n");
+		std::os::unix::fs::symlink(tree.path().join("target.txt"), tree.path().join("link.txt"))
+			.expect("create symlink");
+
+		let mut config = walk_config(tree.path(), "needle");
+		config.gitignore = Some(false);
+		let result = grep_sync(config, None, task::CancelToken::default())
+			.expect("directory grep should succeed");
+
+		let paths: Vec<&str> = result.matches.iter().map(|m| m.path.as_str()).collect();
+		assert_eq!(paths, ["target.txt"], "symlink must not be followed by default");
+		assert_eq!(result.files_with_matches, 1);
+	}
+
 	#[test]
 	fn preserves_unicode_property_escapes() {
 		assert_eq!(sanitize_braces(r"\p{Greek}").as_ref(), r"\p{Greek}");

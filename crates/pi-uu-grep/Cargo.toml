@@ -23,3 +23,4 @@ globset = "0.4"
 
 [dev-dependencies]
 parking_lot.workspace = true
+pi-grep-testkit = { path = "../pi-grep-testkit" }
