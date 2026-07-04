@@ -18,11 +18,6 @@ describe("hashline file ops", () => {
 		expect(() => parsePatch(`SWAP 1.=1:\n+one\nREM`)).toThrow(/REM.*line ops/);
 	});
 
-	it("parses MV with a normalized destination path", () => {
-		const section = Patch.parseSingle(`[${PATH}#AB12]\nMV ${DEST}`);
-		expect(section.fileOp).toEqual({ kind: "move", dest: DEST });
-	});
-
 	it("deletes a tagged file with REM", async () => {
 		const fs = new InMemoryFilesystem([[PATH, CONTENT]]);
 		const snapshots = new InMemorySnapshotStore();

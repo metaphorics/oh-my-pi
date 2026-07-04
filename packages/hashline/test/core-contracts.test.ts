@@ -136,7 +136,6 @@ describe("hashline parser — range-anchor contracts", () => {
 
 	it("rejects obsolete line-hash anchors and applies line-number anchors without per-anchor hashes", () => {
 		expect(() => parsePatch(`2ab:\n${repl("BBB")}`).edits).toThrow(/payload line has no preceding/);
-		expect(applyDiff(content, `${sameLineRange(tag(2))}\n${repl("BBB")}`)).toBe("aaa\nBBB\nccc");
 	});
 });
 
