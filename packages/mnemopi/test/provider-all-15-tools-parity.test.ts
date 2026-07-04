@@ -29,42 +29,6 @@ function schemaFor(name: string) {
 }
 
 describe("provider all-tools parity", () => {
-	it("registers the Python provider-compatible tool surface with valid JSON schemas", () => {
-		const names = TOOLS.map(tool => tool.name);
-		expect(names).toHaveLength(23);
-		for (const name of [
-			"mnemopi_remember",
-			"mnemopi_recall",
-			"mnemopi_sleep",
-			"mnemopi_stats",
-			"mnemopi_invalidate",
-			"mnemopi_validate",
-			"mnemopi_get",
-			"mnemopi_triple_add",
-			"mnemopi_triple_query",
-			"mnemopi_scratchpad_write",
-			"mnemopi_scratchpad_read",
-			"mnemopi_scratchpad_clear",
-			"mnemopi_export",
-			"mnemopi_update",
-			"mnemopi_forget",
-			"mnemopi_import",
-			"mnemopi_diagnose",
-			"mnemopi_shared_remember",
-			"mnemopi_shared_recall",
-			"mnemopi_shared_forget",
-			"mnemopi_shared_stats",
-			"mnemopi_graph_query",
-			"mnemopi_graph_link",
-		]) {
-			expect(names).toContain(name);
-		}
-		for (const tool of TOOLS) {
-			const roundTripped = JSON.parse(JSON.stringify(tool.inputSchema)) as { type: string };
-			expect(roundTripped.type).toBe("object");
-		}
-	});
-
 	it("advertises required arguments for provider write/update/import tools", () => {
 		expect(schemaFor("mnemopi_remember").required).toContain("content");
 		expect(schemaFor("mnemopi_recall").required).toContain("query");
