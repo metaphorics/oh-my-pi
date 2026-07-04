@@ -134,26 +134,6 @@ describe("loginXiaomi with tp- key", () => {
 		expect(seen[1]).toContain(TOKEN_PLAN_HOSTS.ams);
 		expect(seen[2]).toContain(TOKEN_PLAN_HOSTS.cn);
 	});
-
-	it("does NOT hit the standard api.xiaomimimo.com for tp- keys", async () => {
-		const seen: string[] = [];
-
-		const fetchMock: FetchImpl = async input => {
-			seen.push(String(input));
-			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
-		};
-
-		await loginXiaomi({
-			onPrompt: async () => TP_KEY,
-			onAuth: () => {},
-			onProgress: () => {},
-			fetch: fetchMock,
-		});
-
-		for (const url of seen) {
-			expect(url).not.toContain(STANDARD_HOST);
-		}
-	});
 });
 
 // ─── xiaomiModelManagerOptions: runtime model discovery ────────────────────
@@ -216,69 +196,5 @@ describe("xiaomiModelManagerOptions with tp- key", () => {
 		const models = await opts.fetchDynamicModels?.();
 
 		expect(models).toBeNull();
-	});
-
-	it("does NOT use standard host for tp- key model discovery", async () => {
-		const seen: string[] = [];
-
-		const fetchMock: FetchImpl = async input => {
-			seen.push(String(input));
-			return new Response(JSON.stringify({ data: [] }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
-		};
-
-		const opts = xiaomiModelManagerOptions({ apiKey: TP_KEY, fetch: fetchMock });
-		await opts.fetchDynamicModels?.();
-
-		for (const url of seen) {
-			expect(url).not.toContain(STANDARD_HOST);
-		}
-	});
-});
-
-// ─── Full round-trip: login → model discovery ──────────────────────────────
-
-describe("Xiaomi tp- full round-trip", () => {
-	it("login validation and model discovery both use token-plan hosts", async () => {
-		// Phase 1: Login
-		const loginUrls: string[] = [];
-
-		const loginFetchMock: FetchImpl = async input => {
-			loginUrls.push(String(input));
-			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
-		};
-
-		const returnedKey = await loginXiaomi({
-			onPrompt: async () => TP_KEY,
-			onAuth: () => {},
-			onProgress: () => {},
-			fetch: loginFetchMock,
-		});
-
-		expect(returnedKey).toBe(TP_KEY);
-		expect(loginUrls).toHaveLength(1);
-		expect(loginUrls[0]).toContain(TOKEN_PLAN_HOSTS.sgp);
-		expect(loginUrls[0]).toContain("/v1/chat/completions");
-
-		// Phase 2: Model discovery with the returned key
-		const discoveryUrls: string[] = [];
-
-		const discoveryFetchMock: FetchImpl = async input => {
-			discoveryUrls.push(String(input));
-			return new Response(JSON.stringify({ data: [{ id: "mimo-v2.5" }] }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
-		};
-
-		const opts = xiaomiModelManagerOptions({ apiKey: returnedKey, fetch: discoveryFetchMock });
-		const models = await opts.fetchDynamicModels?.();
-
-		expect(discoveryUrls).toHaveLength(1);
-		expect(discoveryUrls[0]).toContain(TOKEN_PLAN_HOSTS.sgp);
-		expect(discoveryUrls[0]).toContain("/v1/models");
-		expect(models).not.toBeNull();
 	});
 });

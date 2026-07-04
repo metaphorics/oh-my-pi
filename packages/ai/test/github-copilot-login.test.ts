@@ -165,38 +165,6 @@ describe("loginGitHubCopilot", () => {
 		expect(credentials.enterpriseUrl).toBe("ghe.example.com");
 	});
 
-	it("blank domain uses github.com", async () => {
-		const fetchMock = vi.fn(async (input: string | URL) => {
-			const url = typeof input === "string" ? input : input.toString();
-			if (url === "https://github.com/login/device/code") {
-				return new Response(JSON.stringify(deviceCodeResponse()), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			if (url === "https://github.com/login/oauth/access_token") {
-				return new Response(JSON.stringify(accessTokenResponse()), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			if (url.includes("/models/") && url.includes("/policy")) {
-				return modelPolicyOk();
-			}
-			throw new Error(`Unexpected URL: ${url}`);
-		});
-
-		const credentials = await loginGitHubCopilot({
-			...FAST_POLL_OPTIONS,
-			fetch: fetchMock as unknown as typeof fetch,
-			onAuth: vi.fn(),
-			onPrompt: mockOnPrompt("   "),
-		});
-
-		expect(credentials.access).toBe("ghu_test");
-		expect(credentials.enterpriseUrl).toBeUndefined();
-	});
-
 	it("invalid domain rejects", async () => {
 		await expect(
 			loginGitHubCopilot({

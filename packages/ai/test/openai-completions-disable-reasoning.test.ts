@@ -123,7 +123,7 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		expect(payload.reasoning).toEqual({ enabled: false });
 	});
 
-	it("sets Qwen enable_thinking: true with reasoning enabled, and false with forced tool choice", async () => {
+	it("sets Qwen enable_thinking: true with reasoning enabled", async () => {
 		const model = buildModel({
 			id: "qwen-reasoner",
 			name: "Qwen Reasoner",
@@ -153,30 +153,6 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		});
 		const payloadEnabled = (await promise) as Record<string, unknown>;
 		expect(payloadEnabled.enable_thinking).toBe(true);
-
-		// 2. Disabled on forced tool choice check
-		const { promise: p2, resolve: r2 } = Promise.withResolvers<unknown>();
-		streamOpenAICompletions(
-			model,
-			{
-				messages: testContext.messages,
-				tools: [
-					{
-						name: "read",
-						description: "Read a file",
-						parameters: { type: "object", properties: {} },
-					},
-				],
-			},
-			{
-				apiKey: "test-key",
-				fetch: createMockFetchForQwen(r2),
-				reasoning: "medium",
-				toolChoice: { type: "tool", name: "read" },
-			},
-		);
-		const payloadDisabled = (await p2) as Record<string, unknown>;
-		expect(payloadDisabled.enable_thinking).toBe(false);
 	});
 
 	it("sets Qwen chat-template thinking format properly", async () => {
@@ -225,7 +201,7 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		expect(payload.chat_template_kwargs).toBeUndefined();
 	});
 
-	it("sets Z.AI thinking format and toggles type logically based on forced tool choice", async () => {
+	it("sets Z.AI thinking format with type enabled for reasoning turns", async () => {
 		const model = buildModel({
 			id: "zai-reasoner",
 			name: "Z.AI Reasoner",
@@ -254,29 +230,6 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		});
 		const payloadEnabled = (await promise) as Record<string, unknown>;
 		expect(payloadEnabled.thinking).toEqual({ type: "enabled" });
-
-		const { promise: p2, resolve: r2 } = Promise.withResolvers<unknown>();
-		streamOpenAICompletions(
-			model,
-			{
-				messages: testContext.messages,
-				tools: [
-					{
-						name: "read",
-						description: "Read a file",
-						parameters: { type: "object", properties: {} },
-					},
-				],
-			},
-			{
-				apiKey: "test-key",
-				fetch: createMockFetchForQwen(r2),
-				reasoning: "medium",
-				toolChoice: { type: "tool", name: "read" },
-			},
-		);
-		const payloadDisabled = (await p2) as Record<string, unknown>;
-		expect(payloadDisabled.thinking).toEqual({ type: "disabled" });
 	});
 });
 

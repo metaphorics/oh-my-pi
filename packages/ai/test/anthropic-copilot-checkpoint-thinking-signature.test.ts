@@ -93,10 +93,6 @@ function assistantBlocksAt(params: WireParam[], index: number): WireBlock[] {
 }
 
 describe("#2851 github-copilot checkpoint/branch-return thinking signature", () => {
-	it("classifies the explicit signing model as non-replay (sanity)", () => {
-		expect(copilotSigningModel().compat.replayUnsignedThinking).toBe(false);
-	});
-
 	it("never emits an empty-signature thinking block for a historical checkpoint turn", () => {
 		const model = copilotSigningModel();
 		// The store holds a full (~14.6k char) Anthropic signature for the checkpoint

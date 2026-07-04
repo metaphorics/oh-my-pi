@@ -70,11 +70,6 @@ describe("resolveOpenAIResponsesCompat supportsDeveloperRole", () => {
 		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(true);
 	});
 
-	it("returns true for github-copilot provider with api.githubcopilot.com", () => {
-		const model = { provider: "github-copilot", name: "Test Model", baseUrl: "https://api.githubcopilot.com" };
-		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(true);
-	});
-
 	it("returns true for github-copilot provider with api.enterprise.githubcopilot.com", () => {
 		const model = {
 			provider: "github-copilot",

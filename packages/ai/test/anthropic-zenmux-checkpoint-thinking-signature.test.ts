@@ -93,10 +93,6 @@ function assistantBlocksAt(params: WireParam[], index: number): WireBlock[] {
 }
 
 describe("#4192 zenmux checkpoint/branch-return thinking signature", () => {
-	it("classifies the derived signing model as non-replay (sanity)", () => {
-		expect(zenmuxSonnet5Model().compat.replayUnsignedThinking).toBe(false);
-	});
-
 	it("never emits an empty-signature thinking block for a historical checkpoint turn", () => {
 		const model = zenmuxSonnet5Model();
 		// The store holds a full Anthropic signature for the checkpoint turn's

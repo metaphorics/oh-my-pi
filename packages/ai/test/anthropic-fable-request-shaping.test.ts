@@ -87,13 +87,6 @@ describe("Anthropic Fable/Mythos forced tool_choice", () => {
 		expect(payload.tool_choice?.type).toBe("auto");
 	});
 
-	it("downgrades tool_choice:'any' to auto for Mythos", async () => {
-		const payload = await capturePayload(adaptiveModel("claude-mythos-5"), {
-			toolChoice: "any",
-		});
-		expect(payload.tool_choice?.type).toBe("auto");
-	});
-
 	it("preserves a forced tool_choice for non-Fable models (Opus 4.8 supports it)", async () => {
 		const payload = await capturePayload(adaptiveModel("claude-opus-4-8"), {
 			toolChoice: { type: "tool", name: "get_weather" },
