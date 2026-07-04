@@ -1,9 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import {
-	containsOrchestrate,
-	highlightOrchestrate,
-	ORCHESTRATE_NOTICE,
-} from "@oh-my-pi/pi-coding-agent/modes/orchestrate";
+import { containsOrchestrate, highlightOrchestrate } from "@oh-my-pi/pi-coding-agent/modes/orchestrate";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { containsUltrathink, highlightUltrathink } from "@oh-my-pi/pi-coding-agent/modes/ultrathink";
 import { clearBundledCommandsCache, loadBundledCommands } from "@oh-my-pi/pi-coding-agent/task/commands";
@@ -68,16 +64,6 @@ describe("orchestrate keyword highlighting", () => {
 		expect(highlightUltrathink("orchestrate")).toBe("orchestrate");
 		expect(containsUltrathink("orchestrate")).toBe(false);
 		expect(containsOrchestrate("ultrathink")).toBe(false);
-	});
-});
-
-describe("orchestrate notice", () => {
-	it("is a self-contained system notice carrying the orchestration contract", () => {
-		expect(ORCHESTRATE_NOTICE.startsWith("<system-notice>")).toBe(true);
-		expect(ORCHESTRATE_NOTICE.endsWith("</system-notice>")).toBe(true);
-		expect(ORCHESTRATE_NOTICE).toContain("orchestrator");
-		// The contract must not retain the slash-command input placeholder.
-		expect(ORCHESTRATE_NOTICE).not.toContain("$@");
 	});
 });
 

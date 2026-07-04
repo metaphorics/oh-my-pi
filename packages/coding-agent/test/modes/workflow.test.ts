@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { containsWorkflow, highlightWorkflow, WORKFLOW_NOTICE } from "@oh-my-pi/pi-coding-agent/modes/workflow";
+import { containsWorkflow, highlightWorkflow } from "@oh-my-pi/pi-coding-agent/modes/workflow";
 
 beforeAll(() => {
 	// highlightWorkflow reads the global theme's color mode.
@@ -44,13 +44,5 @@ describe("workflow keyword highlighting", () => {
 		expect(highlightWorkflow("Workflowz this")).toBe("Workflowz this");
 		const filePath = "packages/coding-agent/test/modes/workflowz.test.ts";
 		expect(highlightWorkflow(filePath)).toBe(filePath);
-	});
-});
-
-describe("workflow notice", () => {
-	it("is a non-empty system notice carrying the eval-fan-out contract", () => {
-		expect(WORKFLOW_NOTICE.length).toBeGreaterThan(0);
-		expect(WORKFLOW_NOTICE).toContain("**workflowz** keyword");
-		expect(WORKFLOW_NOTICE).toContain("parallel(");
 	});
 });

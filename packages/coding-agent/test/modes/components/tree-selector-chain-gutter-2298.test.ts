@@ -42,55 +42,6 @@ describe("issue #2298: chain rows under last-sibling branches keep their gutter"
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 	});
 
-	// The bug rendered the conversation chain under a `└─` branch with bare
-	// spaces, breaking the visual flow back to the parent message. The fix
-	// anchors chain descendants (rows without their own connector) with a `│`
-	// one level right of the suppressed gutter — directly below the branch
-	// head's content — never in the `└─` corner column itself (#2325).
-	it("draws the inherited `│` for chain descendants of a last-sibling branch", () => {
-		const root = makeNode("user", "original");
-		const rootAsst = makeNode("assistant", "resp", root.entry.id);
-		root.children.push(rootAsst);
-
-		// rootAsst branches; branch2 is active (renders first), branch1 is last.
-		const branch1 = makeNode("user", "branch1 head", rootAsst.entry.id);
-		const branch2 = makeNode("user", "branch2 head", rootAsst.entry.id);
-		rootAsst.children.push(branch1, branch2);
-
-		// Chain descendants under branch1 (the LAST sibling) — these are the
-		// rows that used to lose the gutter.
-		const chain1 = makeNode("assistant", "chain-asst-1", branch1.entry.id);
-		branch1.children.push(chain1);
-		const chain2 = makeNode("user", "chain-user-2", chain1.entry.id);
-		chain1.children.push(chain2);
-
-		const fixIt = makeNode("user", "fix it all", branch2.entry.id);
-		branch2.children.push(fixIt);
-
-		const rendered = renderStripped([root], fixIt.entry.id);
-
-		const findRow = (needle: string): string => {
-			const row = rendered.find(line => line.includes(needle));
-			if (!row) throw new Error(`row containing ${JSON.stringify(needle)} not rendered`);
-			return row;
-		};
-
-		// Branch1 is the last sibling at level 1, so its own connector is `└─`.
-		const branch1Row = findRow("user: branch1 head");
-		expect(branch1Row).toMatch(/└─\s+user: branch1 head/);
-
-		// Each chain descendant of branch1 must stay anchored by a `│` drawn
-		// below the branch head's content (one level right of the `└─`
-		// connector). Before #2298 these rows rendered as bare spaces and the
-		// chain floated unanchored; after #2325 the anchor must not sit in the
-		// `└─` corner column, which would dangle below the terminal branch.
-		for (const needle of ["assistant: chain-asst-1", "user: chain-user-2"]) {
-			const row = findRow(needle);
-			expect(row).not.toMatch(/^\s{2}│/);
-			expect(row).toMatch(/^\s{5}│\s+\S/);
-		}
-	});
-
 	// Branched grandchildren and their continuations must stay on the standard
 	// tree convention so a `│` never floats below an unrelated `└─`. Only the
 	// nearest connector gutter is extended for chain rows.

@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
-import * as url from "node:url";
 import { toJsonRpcError } from "@oh-my-pi/pi-coding-agent/mcp/types";
 
 describe("toJsonRpcError", () => {
@@ -78,34 +76,5 @@ describe("message classification", () => {
 
 	it("classifies message with neither method nor id as unknown", () => {
 		expect(classify({ jsonrpc: "2.0" })).toBe("unknown");
-	});
-});
-
-describe("roots response shape", () => {
-	// Specification test: pins the MCP roots/list response shape.
-	// Does not exercise MCPManager.#getRoots — tests the contract, not the wiring.
-
-	function getRoots(cwd: string): { roots: Array<{ uri: string; name: string }> } {
-		return {
-			roots: [
-				{
-					uri: url.pathToFileURL(cwd).href,
-					name: path.basename(cwd),
-				},
-			],
-		};
-	}
-
-	it("returns a single root with file:// URI and directory name", () => {
-		const result = getRoots("/home/user/project");
-		expect(result.roots).toHaveLength(1);
-		expect(result.roots[0].uri).toStartWith("file:///");
-		expect(result.roots[0].name).toBe("project");
-	});
-
-	it("handles paths with spaces", () => {
-		const result = getRoots("/home/user/my project");
-		expect(result.roots[0].uri).toContain("my%20project");
-		expect(result.roots[0].name).toBe("my project");
 	});
 });

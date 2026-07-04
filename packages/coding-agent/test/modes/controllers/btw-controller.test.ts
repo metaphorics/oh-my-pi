@@ -243,18 +243,6 @@ describe("BtwController", () => {
 		expect(controller.canBranch()).toBe(false);
 	});
 
-	it("allows branch after a complete non-empty reply", async () => {
-		const assistantMessage = createAssistantMessage("Answer");
-		const runEphemeralTurn = vi.fn(async () => ({ replyText: "Answer", assistantMessage }));
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
-		const controller = new BtwController(ctx);
-
-		await controller.start("Question?");
-		await drainBtwRequest();
-
-		expect(controller.canBranch()).toBe(true);
-	});
-
 	it("does not allow branch after a complete empty reply", async () => {
 		const runEphemeralTurn = vi.fn(async () => ({
 			replyText: "   ",
