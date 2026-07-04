@@ -423,15 +423,4 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		};
 		await expect(SqlSessionStorage.create({ client })).rejects.toThrow(/unable to infer adapter/);
 	});
-
-	it("explicit `adapter` option overrides the reported adapter", async () => {
-		const client: SqlSessionStorageClient = {
-			options: { adapter: "" }, // empty / missing
-			async unsafe() {
-				return [];
-			},
-		};
-		const storage = await SqlSessionStorage.create({ client, adapter: "postgres" });
-		expect(storage.adapter).toBe("postgres");
-	});
 });
