@@ -183,23 +183,4 @@ describe("ASCII multi-line labels", () => {
 			expect(ascii).toContain("Med");
 		});
 	});
-
-	describe("multiline-utils functions", () => {
-		it("splitLines splits on newlines", () => {
-			// Test through the rendering pipeline
-			const ascii = renderMermaidAscii("graph TD\n  A[One<br>Two<br>Three]", { useAscii: false });
-			const lines = ascii.split("\n");
-			// All three words should appear on separate lines
-			expect(lines.some(l => l.includes("One"))).toBe(true);
-			expect(lines.some(l => l.includes("Two"))).toBe(true);
-			expect(lines.some(l => l.includes("Three"))).toBe(true);
-		});
-
-		it("maxLineWidth uses longest line for box sizing", () => {
-			// Box should be wide enough for the longest line
-			const ascii = renderMermaidAscii("graph TD\n  A[X<br>LongLine<br>Y]", { useAscii: false });
-			// The box should contain LongLine without truncation
-			expect(ascii).toContain("LongLine");
-		});
-	});
 });

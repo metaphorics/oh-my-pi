@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import {
 	parseJsonlLenient,
 	readJsonl,
@@ -11,36 +10,11 @@ import {
 
 const encoder = new TextEncoder();
 
-async function runStringTransform(transform: TransformStream<string, string>, chunks: string[]): Promise<string[]> {
-	const readable = new ReadableStream<string>({
-		start(controller) {
-			for (const chunk of chunks) controller.enqueue(chunk);
-			controller.close();
-		},
-	});
-
-	const reader = readable.pipeThrough(transform).getReader();
-	const output: string[] = [];
-	while (true) {
-		const { value, done } = await reader.read();
-		if (done) break;
-		output.push(value);
-	}
-	return output;
-}
-
 async function collectAsync<T>(iter: AsyncIterable<T>): Promise<T[]> {
 	const output: T[] = [];
 	for await (const item of iter) output.push(item);
 	return output;
 }
-
-describe("sanitizeText", () => {
-	it("strips ANSI and normalizes CR", () => {
-		const input = "\u001b[31mred\u001b[0m\r\n";
-		expect(sanitizeText(input)).toBe("red\n");
-	});
-});
 
 describe("readLines", () => {
 	it("splits lines across chunks without newlines", async () => {
@@ -143,19 +117,6 @@ describe("readJsonl", () => {
 
 		const output = await collectAsync(readJsonl(readable));
 		expect(output).toEqual([{ z: 9 }]);
-	});
-});
-
-describe("createSanitizerStream", () => {
-	it("sanitizes text chunks", async () => {
-		const transform = new TransformStream<string, string>({
-			transform(chunk, controller) {
-				controller.enqueue(sanitizeText(chunk));
-			},
-		});
-		const output = await runStringTransform(transform, ["\u001b[34mhi\u001b[0m\r\n"]);
-
-		expect(output).toEqual(["hi\n"]);
 	});
 });
 

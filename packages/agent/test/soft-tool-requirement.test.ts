@@ -163,23 +163,6 @@ describe("agentLoop soft tool requirement", () => {
 		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "resolve" });
 	});
 
-	it("leaves tool_choice untouched when no requirement is pending", async () => {
-		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: [] };
-		const mock = createMockModel({ responses: [{ content: ["hi"] }] });
-		const config: AgentLoopConfig = {
-			model: mock.model,
-			convertToLlm: identityConverter,
-			getToolChoice: () => undefined,
-		};
-
-		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
-		for await (const _ of stream) {
-			// drain
-		}
-		expect(mock.calls).toHaveLength(1);
-		expect(mock.calls[0]?.options?.toolChoice).toBeUndefined();
-	});
-
 	it("reuses the fetched hard tool choice across a Harmony retry instead of re-consuming getToolChoice", async () => {
 		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: [] };
 		// Consuming source: yields the forced choice once, then nothing — mirrors

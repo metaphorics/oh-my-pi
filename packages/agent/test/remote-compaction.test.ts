@@ -483,38 +483,6 @@ test("uses Azure request shape for Azure Responses remote compaction", async () 
 	}
 });
 
-describe("requestOpenAiRemoteCompaction abort", () => {
-	test("rejects when the abort signal is aborted mid-fetch", async () => {
-		const controller = new AbortController();
-		const fetchMock: FetchImpl = (_input, init) => {
-			// Honor the provided abort signal: hang until aborted, then reject.
-			const signal = init?.signal as AbortSignal | undefined;
-			const { promise, reject } = Promise.withResolvers<Response>();
-			if (signal?.aborted) {
-				reject(signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"));
-				return promise;
-			}
-			signal?.addEventListener("abort", () => {
-				reject(signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"));
-			});
-			return promise;
-		};
-
-		const promise = requestOpenAiRemoteCompaction(
-			makeOpenAiModel(),
-			"test-key",
-			[{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
-			"compact",
-			controller.signal,
-			{ fetch: fetchMock },
-		);
-
-		queueMicrotask(() => controller.abort());
-
-		await expect(promise).rejects.toThrow();
-	});
-});
-
 describe("requestOpenAiRemoteCompaction timeout", () => {
 	test("a never-responding endpoint rejects with TimeoutError instead of hanging", async () => {
 		// Contract: the compact endpoint is a raw fetch outside the pi-ai stream

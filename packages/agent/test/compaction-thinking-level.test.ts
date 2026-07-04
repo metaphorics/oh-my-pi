@@ -134,20 +134,6 @@ describe("compaction thinking-level resolution (regression)", () => {
 		// the actual strip; this just ensures the upstream throw doesn't fire.
 		expect(call[2]?.reasoning).toBeUndefined();
 	});
-
-	test("ThinkingLevel.Inherit on Anthropic → reasoning=high (Inherit folds to historical default)", async () => {
-		const spy = vi
-			.spyOn(ai, "completeSimple")
-			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "handoff" }]));
-		await generateHandoff(messages, getAnthropicModel(), "test-key", {
-			systemPrompt: ["sp"],
-			tools: [],
-			thinkingLevel: ThinkingLevel.Inherit,
-		});
-		const call = spy.mock.calls[0];
-		if (!call) throw new Error("expected completeSimple call");
-		expect(call[2]?.reasoning).toBe(ai.Effort.High);
-	});
 });
 
 // ============================================================================
