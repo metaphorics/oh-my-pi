@@ -956,7 +956,7 @@ fn build_regex_matcher(
 		multi_line: multiline,
 		..pi_grep_core::MatcherSpec::default()
 	};
-	pi_grep_core::build_matcher(std::slice::from_ref(&pattern.to_owned()), &spec)
+	pi_grep_core::build_matcher(std::slice::from_ref(&pattern), &spec)
 }
 
 fn build_matcher(

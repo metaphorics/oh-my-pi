@@ -36,7 +36,7 @@ pub struct MatcherSpec {
 ///
 /// Patterns are OR-ed via `build_many`, matching ripgrep's `-e` repetition.
 pub fn build_matcher(
-	patterns: &[String],
+	patterns: &[impl AsRef<str>],
 	spec: &MatcherSpec,
 ) -> Result<RegexMatcher, grep_regex::Error> {
 	let mut builder = RegexMatcherBuilder::new();
