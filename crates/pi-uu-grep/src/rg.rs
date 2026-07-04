@@ -10,16 +10,10 @@ use std::{
 };
 
 use clap::{ArgAction, Parser};
-use grep_matcher::{LineTerminator, Matcher};
-use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{
-	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
-};
-use ignore::{
-	Match,
-	overrides::{Override, OverrideBuilder},
-	types::{Types, TypesBuilder},
-};
+use grep_matcher::Matcher;
+use grep_regex::RegexMatcher;
+use grep_searcher::{Searcher, Sink, SinkContext, SinkFinish, SinkMatch};
+use pi_grep_core::{BinaryMode, Flow, MatcherSpec, SearcherSpec, TypeSpec, WalkSpec};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -613,57 +607,41 @@ fn count_matches(matcher: &RegexMatcher, line: &[u8]) -> io::Result<u64> {
 	Ok(count)
 }
 
-fn build_matcher(patterns: &[String], cli: &RgCli) -> Result<RegexMatcher, grep_regex::Error> {
-	let mut builder = RegexMatcherBuilder::new();
-	builder
-		.case_insensitive(cli.ignore_case && !cli.case_sensitive)
-		.case_smart(cli.smart_case && !cli.ignore_case && !cli.case_sensitive)
-		.word(cli.word_regexp && !cli.line_regexp)
-		.whole_line(cli.line_regexp)
-		.fixed_strings(cli.fixed_strings && !cli.no_fixed_strings)
-		.multi_line(true)
-		.dot_matches_new_line(cli.multiline && cli.multiline_dotall);
-	if cli.null_data {
-		builder.line_terminator(Some(b'\0'));
-	} else if !cli.multiline {
-		builder.line_terminator(Some(b'\n'));
-	}
-	builder.build_many(patterns)
-}
-
-#[derive(Clone, Copy)]
-enum BinaryMode {
-	Automatic,
-	Explicit,
-}
-
-fn binary_detection(cli: &RgCli, mode: BinaryMode) -> BinaryDetection {
-	if cli.text || cli.null_data {
-		return BinaryDetection::none();
-	}
-	if cli.binary || cli.unrestricted >= 3 || matches!(mode, BinaryMode::Explicit) {
-		BinaryDetection::convert(b'\0')
-	} else {
-		BinaryDetection::quit(b'\0')
+/// Resolve the CLI's matcher flags into a neutral [`MatcherSpec`].
+fn matcher_spec(cli: &RgCli) -> MatcherSpec {
+	MatcherSpec {
+		case_insensitive:     cli.ignore_case && !cli.case_sensitive,
+		case_smart:           cli.smart_case && !cli.ignore_case && !cli.case_sensitive,
+		word:                 cli.word_regexp && !cli.line_regexp,
+		whole_line:           cli.line_regexp,
+		fixed_strings:        cli.fixed_strings && !cli.no_fixed_strings,
+		multi_line:           true,
+		dot_matches_new_line: cli.multiline && cli.multiline_dotall,
+		line_terminator:      if cli.null_data {
+			Some(b'\0')
+		} else if !cli.multiline {
+			Some(b'\n')
+		} else {
+			None
+		},
 	}
 }
 
-fn build_searcher(cli: &RgCli, opts: &SearchOptions, mode: BinaryMode) -> Searcher {
-	let binary_detection = binary_detection(cli, mode);
-	let mut builder = SearcherBuilder::new();
-	builder
-		.line_number(opts.line_number || opts.column || opts.vimgrep)
-		.before_context(opts.before)
-		.after_context(opts.after)
-		.passthru(opts.passthru)
-		.invert_match(cli.invert_match)
-		.multi_line(cli.multiline)
-		.binary_detection(binary_detection)
-		.max_matches(cli.max_count);
-	if cli.null_data {
-		builder.line_terminator(LineTerminator::byte(b'\0'));
+/// Resolve the CLI plus derived [`SearchOptions`] into a neutral
+/// [`SearcherSpec`].
+fn searcher_spec(cli: &RgCli, opts: &SearchOptions) -> SearcherSpec {
+	SearcherSpec {
+		line_number:          opts.line_number || opts.column || opts.vimgrep,
+		before_context:       opts.before,
+		after_context:        opts.after,
+		passthru:             opts.passthru,
+		invert_match:         cli.invert_match,
+		multi_line:           cli.multiline,
+		max_count:            cli.max_count,
+		null_data:            cli.null_data,
+		text:                 cli.text,
+		force_convert_binary: cli.binary || cli.unrestricted >= 3,
 	}
-	builder.build()
 }
 
 fn read_pattern_file(path: &OsStr) -> Result<Vec<String>, String> {
@@ -728,45 +706,35 @@ fn search_options(cli: &RgCli) -> SearchOptions {
 	}
 }
 
-fn parse_size(input: &str) -> Result<u64, String> {
-	let trimmed = input.trim();
-	let Some(last) = trimmed.chars().last() else {
-		return Err("empty size".to_string());
-	};
-	let (digits, multiplier) = match last {
-		'K' | 'k' => (&trimmed[..trimmed.len() - 1], 1024),
-		'M' | 'm' => (&trimmed[..trimmed.len() - 1], 1024 * 1024),
-		'G' | 'g' => (&trimmed[..trimmed.len() - 1], 1024 * 1024 * 1024),
-		_ => (trimmed, 1),
-	};
-	let value = digits
-		.parse::<u64>()
-		.map_err(|err| format!("invalid size {input:?}: {err}"))?;
-	Ok(value.saturating_mul(multiplier))
+/// Resolve the CLI's `--type-*` flags into a neutral [`TypeSpec`].
+fn type_spec(cli: &RgCli) -> TypeSpec {
+	TypeSpec {
+		clears:  cli.type_clears.clone(),
+		adds:    cli.type_adds.clone(),
+		selects: cli.types.clone(),
+		negates: cli.type_nots.clone(),
+	}
 }
 
-fn type_builder(cli: &RgCli) -> Result<TypesBuilder, String> {
-	let mut builder = TypesBuilder::new();
-	builder.add_defaults();
-	for name in &cli.type_clears {
-		builder.clear(name);
+/// Resolve the CLI's traversal flags into a neutral [`WalkSpec`], capturing the
+/// shell cwd here so the engine core never touches `pi-uutils-ctx`.
+fn walk_spec(cli: &RgCli) -> WalkSpec {
+	WalkSpec {
+		cwd:            pi_uutils_ctx::cwd(),
+		globs:          cli.globs.clone(),
+		iglobs:         cli.iglobs.clone(),
+		types:          type_spec(cli),
+		max_filesize:   cli.max_filesize.clone(),
+		include_hidden: (cli.hidden || cli.unrestricted >= 2) && !cli.no_hidden,
+		respect_ignore: !((cli.no_ignore || cli.unrestricted >= 1) && !cli.ignore),
+		follow_links:   cli.follow,
+		sort_path:      cli.sort_files || cli.sort.as_deref() == Some("path"),
+		max_depth:      cli.max_depth.unwrap_or(usize::MAX),
 	}
-	for def in &cli.type_adds {
-		builder
-			.add_def(def)
-			.map_err(|err| format!("rg: --type-add {def:?}: {err}"))?;
-	}
-	for name in &cli.types {
-		builder.select(name);
-	}
-	for name in &cli.type_nots {
-		builder.negate(name);
-	}
-	Ok(builder)
 }
 
 fn print_type_list<W: Write>(cli: &RgCli, out: &mut W) -> Result<(), String> {
-	let builder = type_builder(cli)?;
+	let builder = pi_grep_core::build_types(&type_spec(cli))?;
 	for def in builder.definitions() {
 		write!(out, "{}: ", def.name()).map_err(|err| err.to_string())?;
 		for (idx, glob) in def.globs().iter().enumerate() {
@@ -779,118 +747,6 @@ fn print_type_list<W: Write>(cli: &RgCli, out: &mut W) -> Result<(), String> {
 		out.write_all(b"\n").map_err(|err| err.to_string())?;
 	}
 	Ok(())
-}
-
-struct RgWalk {
-	request: pi_walker::WalkRequest,
-	filters: PathFilters,
-}
-
-struct PathFilters {
-	overrides:    Option<Override>,
-	types:        Option<Types>,
-	max_filesize: Option<u64>,
-}
-
-impl PathFilters {
-	fn includes(&self, path: &Path, file_type: pi_walker::FileType, size: Option<f64>) -> bool {
-		let is_dir = file_type == pi_walker::FileType::Dir;
-		if self
-			.overrides
-			.as_ref()
-			.is_some_and(|overrides| matches!(overrides.matched(path, is_dir), Match::Ignore(_)))
-		{
-			return false;
-		}
-		if file_type != pi_walker::FileType::File {
-			return true;
-		}
-		if self
-			.types
-			.as_ref()
-			.is_some_and(|types| matches!(types.matched(path, false), Match::Ignore(_)))
-		{
-			return false;
-		}
-		if let Some(limit) = self.max_filesize {
-			let size = size.or_else(|| std::fs::metadata(path).ok().map(|meta| meta.len() as f64));
-			if size.is_some_and(|size| size > limit as f64) {
-				return false;
-			}
-		}
-		true
-	}
-}
-
-fn build_path_filters(cli: &RgCli) -> Result<PathFilters, String> {
-	let cwd = pi_uutils_ctx::cwd();
-	let max_filesize = cli
-		.max_filesize
-		.as_ref()
-		.map(|size| parse_size(size).map_err(|err| format!("rg: {err}")))
-		.transpose()?;
-	let overrides = if cli.globs.is_empty() && cli.iglobs.is_empty() {
-		None
-	} else {
-		let mut overrides = OverrideBuilder::new(&cwd);
-		for glob in &cli.globs {
-			overrides
-				.add(glob)
-				.map_err(|err| format!("rg: --glob {glob:?}: {err}"))?;
-		}
-		if !cli.iglobs.is_empty() {
-			overrides
-				.case_insensitive(true)
-				.map_err(|err| format!("rg: --iglob: {err}"))?;
-			for glob in &cli.iglobs {
-				overrides
-					.add(glob)
-					.map_err(|err| format!("rg: --iglob {glob:?}: {err}"))?;
-			}
-		}
-		Some(overrides.build().map_err(|err| format!("rg: {err}"))?)
-	};
-	let types = if cli.types.is_empty() && cli.type_nots.is_empty() {
-		None
-	} else {
-		Some(
-			type_builder(cli)?
-				.build()
-				.map_err(|err| format!("rg: {err}"))?,
-		)
-	};
-	Ok(PathFilters { overrides, types, max_filesize })
-}
-
-fn build_walk(cli: &RgCli, root: &Path) -> Result<RgWalk, String> {
-	let filters = build_path_filters(cli)?;
-	let unrestricted_no_ignore = cli.unrestricted >= 1;
-	let include_hidden = (cli.hidden || cli.unrestricted >= 2) && !cli.no_hidden;
-	let no_ignore = (cli.no_ignore || unrestricted_no_ignore) && !cli.ignore;
-	let order = if cli.sort_files || cli.sort.as_deref() == Some("path") {
-		pi_walker::WalkOrder::Path
-	} else {
-		pi_walker::WalkOrder::Unordered
-	};
-	let request = pi_walker::WalkRequest::new(root)
-		.hidden(include_hidden)
-		.gitignore(!no_ignore)
-		.skip_git(!no_ignore)
-		.skip_node_modules(false)
-		.follow_links(pi_walker::FollowLinks::from(cli.follow))
-		.detail(if filters.max_filesize.is_some() {
-			pi_walker::WalkDetail::Full
-		} else {
-			pi_walker::WalkDetail::Minimal
-		})
-		.order(order)
-		.emit_root(false)
-		.depth(1, cli.max_depth.unwrap_or(usize::MAX))
-		.visit_order(pi_walker::VisitOrder::PreOrder)
-		.directory_errors(pi_walker::DirectoryErrorMode::Visit)
-		.same_file_system(false)
-		.cache(false);
-	Ok(RgWalk { request, filters })
 }
 
 fn display_path(operand: &OsStr, root: &Path, path: &Path) -> PathBuf {
@@ -1026,7 +882,7 @@ fn search_dir<W: Write>(
 	if cli.sortr.as_deref() == Some("path") {
 		return search_collected_files(cli, matcher, searcher, operand, root, show_names, opts, out);
 	}
-	let walk = match build_walk(cli, root) {
+	let walk = match pi_grep_core::build_walk(&walk_spec(cli), root) {
 		Ok(walk) => walk,
 		Err(err) => {
 			if !opts.no_messages {
@@ -1037,98 +893,59 @@ fn search_dir<W: Write>(
 	};
 	let any_match = std::cell::Cell::new(false);
 	let had_error = std::cell::Cell::new(false);
-	let streamed = match walk.request.for_each_entry_with_heartbeat(
-		|| {
-			if pi_uutils_ctx::is_cancelled() {
-				Err(io::Error::from(io::ErrorKind::Interrupted))
-			} else {
-				Ok::<(), io::Error>(())
-			}
-		},
-		|entry| {
-			if opts.quiet && any_match.get() {
-				return Ok(pi_walker::WalkDecision::Stop);
-			}
-			let path = entry.absolute_path.as_ref();
-			if !walk.filters.includes(path, entry.file_type, entry.size) {
-				return Ok(if entry.file_type == pi_walker::FileType::Dir {
-					pi_walker::WalkDecision::SkipDescend
-				} else {
-					pi_walker::WalkDecision::Skip
-				});
-			}
-			if entry.file_type != pi_walker::FileType::File {
-				return Ok(pi_walker::WalkDecision::Skip);
-			}
+	// The core walk owns filtering and the cancellation heartbeat; this closure
+	// only searches each included file. Quiet mode stops at the first match, so
+	// the pre-filter quiet short-circuit is unreachable once we've stopped.
+	let result = walk.stream_files(
+		pi_uutils_ctx::is_cancelled,
+		|path| {
 			let display_path = display_path(operand, root, path);
 			let display_bytes = display_path.as_os_str().as_encoded_bytes().to_vec();
 			let display = show_names.then_some(display_bytes.as_slice());
 			let outcome = process_file(matcher, searcher, path, display, opts, out);
 			any_match.set(any_match.get() || outcome.any_match);
 			had_error.set(had_error.get() || outcome.had_error);
-			Ok(if opts.quiet && any_match.get() {
-				pi_walker::WalkDecision::Stop
+			if opts.quiet && any_match.get() {
+				Flow::Stop
 			} else {
-				pi_walker::WalkDecision::Include
-			})
+				Flow::Continue
+			}
 		},
-		|error| {
+		|path, err| {
 			had_error.set(true);
 			if !opts.no_messages {
-				let _ =
-					writeln!(pi_uutils_ctx::stderr(), "rg: {}: {}", error.path.display(), error.error);
+				let _ = writeln!(pi_uutils_ctx::stderr(), "rg: {}: {}", path.display(), err);
 			}
-			Ok(pi_walker::WalkDecision::Include)
+			Flow::Continue
 		},
-	) {
+	);
+	match result {
 		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => {
-			Some(SearchOutcome { any_match: any_match.get(), had_error: had_error.get() })
+			SearchOutcome { any_match: any_match.get(), had_error: had_error.get() }
 		},
+		// Harness cancellation; the shell wrapper overrides the exit code and
+		// stays silent on stderr — no spurious "interrupted" diagnostic.
 		Err(pi_walker::WalkError::Interrupted(_)) if pi_uutils_ctx::is_cancelled() => {
-			// Harness cancellation; the shell wrapper overrides the exit code
-			// and stay-silent on stderr — no spurious "interrupted" diagnostic.
-			had_error.set(true);
-			Some(SearchOutcome { any_match: any_match.get(), had_error: true })
+			SearchOutcome { any_match: any_match.get(), had_error: true }
 		},
 		Err(err) => {
-			had_error.set(true);
 			if !opts.no_messages {
 				let _ = writeln!(pi_uutils_ctx::stderr(), "rg: {err}");
 			}
-			Some(SearchOutcome { any_match: any_match.get(), had_error: had_error.get() })
+			SearchOutcome { any_match: any_match.get(), had_error: true }
 		},
-	};
-	streamed.unwrap_or_else(|| {
-		search_collected_files(cli, matcher, searcher, operand, root, show_names, opts, out)
-	})
+	}
 }
 
 fn collect_filtered_files(cli: &RgCli, root: &Path) -> Result<Vec<PathBuf>, String> {
-	let walk = build_walk(cli, root)?;
-	let outcome = match walk.request.collect_with_heartbeat(|| {
-		if pi_uutils_ctx::is_cancelled() {
-			Err(io::Error::from(io::ErrorKind::Interrupted))
-		} else {
-			Ok::<(), io::Error>(())
-		}
-	}) {
-		Ok(outcome) => outcome,
+	let walk = pi_grep_core::build_walk(&walk_spec(cli), root)?;
+	match walk.collect_files(pi_uutils_ctx::is_cancelled) {
+		Ok(files) => Ok(files),
 		Err(pi_walker::WalkError::Interrupted(_)) if pi_uutils_ctx::is_cancelled() => {
-			return Err(String::from("rg: cancelled"));
+			Err(String::from("rg: cancelled"))
 		},
-		Err(err) => return Err(format!("rg: {err}")),
-	};
-	let mut files = Vec::new();
-	for entry in outcome.entries {
-		if entry.file_type != pi_walker::FileType::File {
-			continue;
-		}
-		let path = entry.absolute_path(root);
-		if walk.filters.includes(&path, entry.file_type, entry.size) {
-			files.push(path);
-		}
+		Err(err) => Err(format!("rg: {err}")),
 	}
-	Ok(files)
 }
 
 fn list_files<W: Write>(cli: &RgCli, paths: &[OsString], out: &mut W) -> SearchOutcome {
@@ -1259,15 +1076,16 @@ pub fn run(argv: Vec<OsString>) -> i32 {
 	if patterns.is_empty() {
 		return 1;
 	}
-	let matcher = match build_matcher(&patterns, &cli) {
+	let matcher = match pi_grep_core::build_matcher(&patterns, &matcher_spec(&cli)) {
 		Ok(matcher) => matcher,
 		Err(err) => {
 			let _ = writeln!(pi_uutils_ctx::stderr(), "rg: {err}");
 			return 2;
 		},
 	};
-	let mut auto_searcher = build_searcher(&cli, &opts, BinaryMode::Automatic);
-	let mut explicit_searcher = build_searcher(&cli, &opts, BinaryMode::Explicit);
+	let searcher_spec = searcher_spec(&cli, &opts);
+	let mut auto_searcher = pi_grep_core::build_searcher(&searcher_spec, BinaryMode::Automatic);
+	let mut explicit_searcher = pi_grep_core::build_searcher(&searcher_spec, BinaryMode::Explicit);
 	let recursive = paths.iter().any(|path| {
 		path.as_os_str() != OsStr::new("-")
 			&& std::fs::metadata(pi_uutils_ctx::resolve(path)).is_ok_and(|meta| meta.is_dir())
