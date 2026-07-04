@@ -882,7 +882,7 @@ fn search_dir<W: Write>(
 		Ok(walk) => walk,
 		Err(err) => {
 			if !opts.no_messages {
-				let _ = writeln!(pi_uutils_ctx::stderr(), "{err}");
+				let _ = writeln!(pi_uutils_ctx::stderr(), "rg: {err}");
 			}
 			return SearchOutcome { any_match: false, had_error: true };
 		},
@@ -934,7 +934,8 @@ fn search_dir<W: Write>(
 }
 
 fn collect_filtered_files(cli: &RgCli, root: &Path) -> Result<Vec<PathBuf>, String> {
-	let walk = pi_grep_core::build_walk(&walk_spec(cli), root)?;
+	let walk =
+		pi_grep_core::build_walk(&walk_spec(cli), root).map_err(|err| format!("rg: {err}"))?;
 	match walk.collect_files(pi_uutils_ctx::is_cancelled) {
 		Ok(files) => Ok(files),
 		Err(pi_walker::WalkError::Interrupted(_)) if pi_uutils_ctx::is_cancelled() => {

@@ -9,9 +9,10 @@
 //! [`GrepWalk::stream_files`] and [`GrepWalk::collect_files`] take a caller
 //! cancellation predicate and wire it into `pi_walker`'s heartbeat themselves,
 //! so a consumer can never accidentally pass a no-op heartbeat and let a walk
-//! ignore the cancel flag (regression #3933). The error strings carry `rg:`
-//! prefixes verbatim from the origin builtin; a future consumer that needs
-//! neutral diagnostics should format its own from the structured inputs.
+//! ignore the cancel flag (regression #3933). Error strings are engine-neutral:
+//! they name the offending flag (`--glob`, `--type-add`, …) and the underlying
+//! error, without any CLI prefix. A consumer prepends its own diagnostic prefix
+//! (e.g. `rg:`) at the boundary where it surfaces the error.
 
 use std::{
 	io,
@@ -64,7 +65,7 @@ pub struct WalkSpec {
 }
 
 /// Post-traversal path filters applied to each candidate entry.
-pub struct PathFilters {
+struct PathFilters {
 	overrides:    Option<Override>,
 	types:        Option<Types>,
 	max_filesize: Option<u64>,
@@ -73,7 +74,7 @@ pub struct PathFilters {
 impl PathFilters {
 	/// Whether `path` (of kind `file_type`, with optional known `size`) survives
 	/// the override/type/size filters. Directories are gated by overrides only.
-	pub fn includes(&self, path: &Path, file_type: FileType, size: Option<f64>) -> bool {
+	fn includes(&self, path: &Path, file_type: FileType, size: Option<f64>) -> bool {
 		let is_dir = file_type == FileType::Dir;
 		if self
 			.overrides
@@ -230,7 +231,8 @@ fn parse_size(input: &str) -> Result<u64, String> {
 ///
 /// Shared by [`build_walk`] (which calls `.build()` to obtain a [`Types`]
 /// matcher) and by the consumer's `--type-list` output (which iterates the
-/// definitions). Error strings carry the `rg:` prefix verbatim.
+/// definitions). Error strings are engine-neutral; the consumer prepends its
+/// own CLI prefix (e.g. `rg:`) at the boundary.
 pub fn build_types(spec: &TypeSpec) -> Result<TypesBuilder, String> {
 	let mut builder = TypesBuilder::new();
 	builder.add_defaults();
@@ -240,7 +242,7 @@ pub fn build_types(spec: &TypeSpec) -> Result<TypesBuilder, String> {
 	for def in &spec.adds {
 		builder
 			.add_def(def)
-			.map_err(|err| format!("rg: --type-add {def:?}: {err}"))?;
+			.map_err(|err| format!("--type-add {def:?}: {err}"))?;
 	}
 	for name in &spec.selects {
 		builder.select(name);
@@ -255,7 +257,7 @@ fn build_path_filters(spec: &WalkSpec) -> Result<PathFilters, String> {
 	let max_filesize = spec
 		.max_filesize
 		.as_ref()
-		.map(|size| parse_size(size).map_err(|err| format!("rg: {err}")))
+		.map(|size| parse_size(size))
 		.transpose()?;
 	let overrides = if spec.globs.is_empty() && spec.iglobs.is_empty() {
 		None
@@ -264,19 +266,19 @@ fn build_path_filters(spec: &WalkSpec) -> Result<PathFilters, String> {
 		for glob in &spec.globs {
 			overrides
 				.add(glob)
-				.map_err(|err| format!("rg: --glob {glob:?}: {err}"))?;
+				.map_err(|err| format!("--glob {glob:?}: {err}"))?;
 		}
 		if !spec.iglobs.is_empty() {
 			overrides
 				.case_insensitive(true)
-				.map_err(|err| format!("rg: --iglob: {err}"))?;
+				.map_err(|err| format!("--iglob: {err}"))?;
 			for glob in &spec.iglobs {
 				overrides
 					.add(glob)
-					.map_err(|err| format!("rg: --iglob {glob:?}: {err}"))?;
+					.map_err(|err| format!("--iglob {glob:?}: {err}"))?;
 			}
 		}
-		Some(overrides.build().map_err(|err| format!("rg: {err}"))?)
+		Some(overrides.build().map_err(|err| err.to_string())?)
 	};
 	let types = if spec.types.selects.is_empty() && spec.types.negates.is_empty() {
 		None
@@ -284,7 +286,7 @@ fn build_path_filters(spec: &WalkSpec) -> Result<PathFilters, String> {
 		Some(
 			build_types(&spec.types)?
 				.build()
-				.map_err(|err| format!("rg: {err}"))?,
+				.map_err(|err| err.to_string())?,
 		)
 	};
 	Ok(PathFilters { overrides, types, max_filesize })

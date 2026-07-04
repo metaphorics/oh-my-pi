@@ -19,4 +19,4 @@ pub mod walk;
 
 pub use matcher::{MatcherSpec, build_matcher};
 pub use searcher::{BinaryMode, SearcherSpec, binary_detection, build_searcher};
-pub use walk::{Flow, GrepWalk, PathFilters, TypeSpec, WalkSpec, build_types, build_walk};
+pub use walk::{Flow, GrepWalk, TypeSpec, WalkSpec, build_types, build_walk};
