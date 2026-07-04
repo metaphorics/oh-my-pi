@@ -9,18 +9,45 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
-
 import { getWorktreeDir, hashPath, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import type { Settings } from "../config/settings";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
 import { formatShortSha } from "./gh-format";
+import {
+	buildTextResult,
+	formatAuthor,
+	formatLabels,
+	type GhLabel,
+	type GhPrCheckoutSummary,
+	type GhRunWatchFailedLogDetails,
+	type GhRunWatchJobDetails,
+	type GhRunWatchRunDetails,
+	type GhRunWatchViewDetails,
+	type GhToolDetails,
+	type GhUser,
+	type GithubInput,
+	githubSchema,
+	normalizeOptionalString,
+	normalizeText,
+	pushLine,
+	requireCurrentGitBranch,
+	requireNonEmpty,
+	resolveDefaultRepoMemoized,
+} from "./gh-shared";
 import { type CacheStatus, getOrFetchView, invalidateAllForNumber, resolveGithubCacheAuthKey } from "./github-cache";
-import type { OutputMeta } from "./output-meta";
 import { ToolError, throwIfAborted } from "./tool-errors";
-import { toolResult } from "./tool-result";
+
+export {
+	type GhPrCheckoutSummary,
+	type GhRunWatchFailedLogDetails,
+	type GhRunWatchJobDetails,
+	type GhRunWatchRunDetails,
+	type GhRunWatchViewDetails,
+	type GhToolDetails,
+	resolveDefaultRepoMemoized,
+} from "./gh-shared";
 
 const GH_REPO_FIELDS = [
 	"nameWithOwner",
@@ -38,6 +65,7 @@ const GH_REPO_FIELDS = [
 	"viewerPermission",
 	"visibility",
 ];
+
 const GH_ISSUE_FIELDS = [
 	"author",
 	"body",
@@ -51,6 +79,7 @@ const GH_ISSUE_FIELDS = [
 	"updatedAt",
 	"url",
 ];
+
 const GH_ISSUE_FIELDS_NO_COMMENTS = [
 	"author",
 	"body",
@@ -120,6 +149,7 @@ const GH_PR_FIELDS = [
 	"updatedAt",
 	"url",
 ];
+
 const GH_PR_FIELDS_NO_COMMENTS = [
 	"author",
 	"baseRefName",
@@ -138,7 +168,9 @@ const GH_PR_FIELDS_NO_COMMENTS = [
 	"updatedAt",
 	"url",
 ];
+
 const GH_REPO_CLONE_FIELDS = ["nameWithOwner", "sshUrl", "url"];
+
 const GH_PR_CHECKOUT_FIELDS = [
 	"baseRefName",
 	"headRefName",
@@ -151,6 +183,7 @@ const GH_PR_CHECKOUT_FIELDS = [
 	"title",
 	"url",
 ];
+
 // /search/<endpoint> API response shapes (subset). Used when projecting raw
 // REST results into the normalized `GhSearch*Result` shapes the formatters
 // consume. We talk to the API directly because `gh search prs`/`issues`
@@ -161,16 +194,20 @@ interface GhApiSearchResponse<T> {
 	incomplete_results?: boolean;
 	items?: T[];
 }
+
 interface GhApiUser {
 	login?: string;
 	name?: string | null;
 }
+
 interface GhApiLabel {
 	name?: string;
 }
+
 interface GhApiPullRequestRef {
 	merged_at?: string | null;
 }
+
 interface GhApiSearchIssueItem {
 	number?: number;
 	title?: string;
@@ -184,6 +221,7 @@ interface GhApiSearchIssueItem {
 	repository_url?: string;
 	pull_request?: GhApiPullRequestRef | null;
 }
+
 interface GhApiSearchCodeItem {
 	name?: string;
 	path?: string;
@@ -192,11 +230,13 @@ interface GhApiSearchCodeItem {
 	repository?: { full_name?: string } | null;
 	text_matches?: Array<{ fragment?: string; property?: string }>;
 }
+
 interface GhApiSearchCommitGitActor {
 	name?: string;
 	email?: string;
 	date?: string;
 }
+
 interface GhApiSearchCommitItem {
 	sha?: string;
 	node_id?: string;
@@ -210,6 +250,7 @@ interface GhApiSearchCommitItem {
 	} | null;
 	repository?: { full_name?: string } | null;
 }
+
 interface GhApiSearchRepoItem {
 	full_name?: string;
 	description?: string | null;
@@ -226,25 +267,45 @@ interface GhApiSearchRepoItem {
 	html_url?: string;
 	owner?: GhApiUser | null;
 }
+
 const SEARCH_LIMIT_DEFAULT = 10;
+
 const SEARCH_LIMIT_MAX = 50;
+
 const FILE_PREVIEW_LIMIT = 50;
+
 const RUN_WATCH_INTERVAL_DEFAULT = 3;
+
 const RUN_WATCH_INTERVAL_SLOW = 15;
+
 const RUN_WATCH_FAST_WINDOW_MS = 60_000;
+
 const RUN_WATCH_NO_RUNS_GIVE_UP_MS = 90_000;
+
 const RUN_WATCH_MAX_POLL_FAILURES = 5;
+
 const RUN_WATCH_GRACE_DEFAULT = 5;
+
 const RUN_WATCH_TAIL_DEFAULT = 15;
+
 const RUN_WATCH_TAIL_MAX = 200;
+
 const REVIEW_COMMENTS_PAGE_SIZE = 100;
+
 const RUN_JOBS_PAGE_SIZE = 100;
+
 const PR_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/.*)?$/;
+
 const ISSUE_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)(?:\/.*)?$/;
+
 const RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)(?:\/.*)?$/;
+
 const RUN_SUCCESS_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
+
 const RUN_FAILURE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
+
 const JOB_FAILURE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required"]);
+
 const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"repo_view",
 	"search_issues",
@@ -254,115 +315,6 @@ const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"search_repos",
 	"run_watch",
 ]);
-
-const githubSchema = type({
-	op: type(
-		"'repo_view' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
-	).describe("github operation"),
-	"repo?": type("string").describe("owner/repo"),
-	"branch?": type("string").describe("branch"),
-	"pr?": type("string | string[]").describe("pr number, url, or branch"),
-	"force?": type("boolean").describe("reset existing local branch"),
-	"forceWithLease?": type("boolean").describe("force-with-lease push"),
-	"title?": type("string").describe("pr title"),
-	"body?": type("string").describe("pr body markdown"),
-	"base?": type("string").describe("pr base branch"),
-	"head?": type("string").describe("pr head branch"),
-	"draft?": type("boolean").describe("open pr as draft"),
-	"fill?": type("boolean").describe("auto-fill pr title/body from commits"),
-	"reviewer?": type("string[]").describe("reviewers"),
-	"assignee?": type("string[]").describe("assignees"),
-	"label?": type("string[]").describe("labels"),
-	"query?": type("string").describe("search query"),
-	"since?": type("string").describe("lower-bound date filter"),
-	"until?": type("string").describe("upper-bound date filter"),
-	"dateField?": type("'created' | 'updated'").describe("date field"),
-	"limit?": type("number").describe("max results"),
-	"run?": type("string").describe("actions run id or url"),
-	"tail?": type("number").describe("log lines per failed job"),
-});
-
-type GithubInput = typeof githubSchema.infer;
-
-export interface GhToolDetails {
-	meta?: OutputMeta;
-	artifactId?: string;
-	repo?: string;
-	branch?: string;
-	worktreePath?: string;
-	remote?: string;
-	remoteBranch?: string;
-	headSha?: string;
-	runId?: number;
-	runIds?: number[];
-	status?: string;
-	conclusion?: string;
-	failedJobs?: string[];
-	watch?: GhRunWatchViewDetails;
-	checkouts?: GhPrCheckoutSummary[];
-}
-
-export interface GhPrCheckoutSummary {
-	prNumber?: number;
-	url?: string;
-	branch: string;
-	worktreePath: string;
-	remote: string;
-	remoteBranch: string;
-	reused: boolean;
-}
-
-export interface GhRunWatchJobDetails {
-	id: number;
-	name: string;
-	status?: string;
-	conclusion?: string;
-	durationSeconds?: number;
-	url?: string;
-}
-
-export interface GhRunWatchRunDetails {
-	id: number;
-	workflowName?: string;
-	displayTitle?: string;
-	status?: string;
-	conclusion?: string;
-	branch?: string;
-	headSha?: string;
-	url?: string;
-	jobs: GhRunWatchJobDetails[];
-}
-
-export interface GhRunWatchFailedLogDetails {
-	runId: number;
-	workflowName?: string;
-	jobName: string;
-	conclusion?: string;
-	tail?: string;
-	available: boolean;
-}
-
-export interface GhRunWatchViewDetails {
-	mode: "run" | "commit";
-	state: "watching" | "completed";
-	repo: string;
-	branch?: string;
-	headSha?: string;
-	pollCount?: number;
-	note?: string;
-	run?: GhRunWatchRunDetails;
-	runs?: GhRunWatchRunDetails[];
-	failedLogs?: GhRunWatchFailedLogDetails[];
-}
-
-interface GhUser {
-	login?: string;
-	name?: string | null;
-}
-
-interface GhLabel {
-	name?: string;
-}
 
 interface GhComment {
 	author?: GhUser | null;
@@ -622,21 +574,12 @@ interface GhFailedJobLog {
 	available: boolean;
 }
 
-function normalizeText(value: string | null | undefined): string {
-	return (value ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll("\t", "    ").trim();
-}
-
 function normalizeBlock(value: string | null | undefined): string {
 	return (value ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll("\t", "    ").trimEnd();
 }
 
 function looksLikeGitHubUrl(value: string | undefined): boolean {
 	return value?.startsWith("https://github.com/") ?? false;
-}
-
-function normalizeOptionalString(value: string | null | undefined): string | undefined {
-	const normalized = value?.trim();
-	return normalized ? normalized : undefined;
 }
 
 function normalizePrIdentifierList(value: string | string[] | undefined): string[] {
@@ -648,14 +591,6 @@ function normalizePrIdentifierList(value: string | string[] | undefined): string
 		if (trimmed) cleaned.push(trimmed);
 	}
 	return cleaned;
-}
-
-function requireNonEmpty(value: string | null | undefined, label: string): string {
-	const normalized = normalizeOptionalString(value);
-	if (!normalized) {
-		throw new ToolError(`${label} must not be empty`);
-	}
-	return normalized;
 }
 
 function resolveSearchLimit(value: number | undefined): number {
@@ -693,7 +628,9 @@ function appendRepoFlag(args: string[], repo: string | undefined, identifier?: s
 const REPO_API_URL_PREFIX = "https://api.github.com/repos/";
 
 const RELATIVE_DURATION_PATTERN = /^(\d+)\s*(m|h|d|w|mo|y)$/i;
+
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
 const FIXED_UNIT_MS: Record<string, number> = {
 	m: 60_000,
 	h: 3_600_000,
@@ -936,15 +873,6 @@ async function requirePrimaryGitRepoRoot(cwd: string, signal?: AbortSignal): Pro
 	return primaryRepoRoot;
 }
 
-async function requireCurrentGitBranch(cwd: string, signal?: AbortSignal): Promise<string> {
-	const branch = await git.branch.current(cwd, signal);
-	if (!branch) {
-		throw new ToolError("Current git branch is unavailable. Pass `branch` or `run` explicitly.");
-	}
-
-	return branch;
-}
-
 async function requireCurrentGitHead(cwd: string, signal?: AbortSignal): Promise<string> {
 	const headSha = await git.head.sha(cwd, signal);
 	if (!headSha) {
@@ -1107,24 +1035,6 @@ async function resolvePrBranchPushTarget(
 				: ["1", "true", "yes", "on"].includes(maintainerCanModifyValue.toLowerCase()),
 		isCrossRepository: ["1", "true", "yes", "on"].includes((isCrossRepositoryValue ?? "").toLowerCase()),
 	};
-}
-
-function formatAuthor(author: GhUser | null | undefined): string | undefined {
-	if (!author) return undefined;
-	if (author.login) return `@${author.login}`;
-	if (author.name) return author.name;
-	return undefined;
-}
-
-function formatLabels(labels: GhLabel[] | undefined): string | undefined {
-	const names = labels?.map(label => label.name).filter((value): value is string => Boolean(value)) ?? [];
-	if (names.length === 0) return undefined;
-	return names.join(", ");
-}
-
-function pushLine(lines: string[], label: string, value: string | number | boolean | undefined): void {
-	if (value === undefined || value === "") return;
-	lines.push(`${label}: ${value}`);
 }
 
 function parseRunReference(value: string | undefined): GhRunReference {
@@ -1710,52 +1620,6 @@ async function resolveGitHubRepo(
 		signal,
 	);
 	return requireNonEmpty(resolved, "repo");
-}
-
-/**
- * Process-lifetime cache of `gh repo view --json nameWithOwner` lookups keyed
- * by absolute cwd. Avoids repeated `gh` chatter when the same protocol handler
- * or tool call resolves the default repo many times in a row.
- *
- * The shared lookup is intentionally **not** bound to any caller's
- * AbortSignal. Cancelling one caller would otherwise kill the underlying
- * `gh repo view` for every concurrent waiter on the same cwd. Each caller's
- * signal is honored at the wait point via `untilAborted` instead, so an abort
- * unwinds only that caller.
- */
-const DEFAULT_REPO_RESOLVED = new Map<string, string>();
-const DEFAULT_REPO_INFLIGHT = new Map<string, Promise<string>>();
-
-export async function resolveDefaultRepoMemoized(cwd: string, signal?: AbortSignal): Promise<string> {
-	const key = path.resolve(cwd);
-	const ready = DEFAULT_REPO_RESOLVED.get(key);
-	if (ready) return ready;
-	let pending = DEFAULT_REPO_INFLIGHT.get(key);
-	if (!pending) {
-		pending = (async () => {
-			// No caller signal: this lookup is shared across every concurrent
-			// waiter on the same cwd.
-			const resolved = await git.github.text(cwd, [
-				"repo",
-				"view",
-				"--json",
-				"nameWithOwner",
-				"-q",
-				".nameWithOwner",
-			]);
-			const value = requireNonEmpty(resolved, "repo");
-			DEFAULT_REPO_RESOLVED.set(key, value);
-			return value;
-		})();
-		// Drop the in-flight slot on settle so failures don't poison the cache
-		// and so a successful resolution survives only in `DEFAULT_REPO_RESOLVED`.
-		void pending.then(
-			() => DEFAULT_REPO_INFLIGHT.delete(key),
-			() => DEFAULT_REPO_INFLIGHT.delete(key),
-		);
-		DEFAULT_REPO_INFLIGHT.set(key, pending);
-	}
-	return untilAborted(signal, pending);
 }
 
 /**
@@ -2420,32 +2284,6 @@ async function saveArtifactText(session: ToolSession, toolType: string, text: st
 	return artifactId;
 }
 
-function appendArtifactReference(text: string, artifactId: string | undefined, label: string): string {
-	if (!artifactId) {
-		return text;
-	}
-
-	return `${text}\n\n${label}: artifact://${artifactId}`;
-}
-
-function buildTextResult(
-	text: string,
-	sourceUrl?: string,
-	details?: GhToolDetails,
-	options?: { artifactId?: string; artifactLabel?: string; useless?: boolean },
-): AgentToolResult<GhToolDetails> {
-	const builder = toolResult<GhToolDetails>(details).text(
-		appendArtifactReference(text, options?.artifactId, options?.artifactLabel ?? "Saved artifact"),
-	);
-	if (sourceUrl) {
-		builder.sourceUrl(sourceUrl);
-	}
-	if (options?.useless) {
-		builder.useless();
-	}
-	return builder.done();
-}
-
 export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {
 	readonly name = "github";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -2713,6 +2551,7 @@ export interface PrDiffLookupOptions {
 	settings?: Settings;
 	cacheAuthKey?: string | null;
 }
+
 /**
  * Split `gh pr diff` output on `^diff --git ` boundaries and parse per-file
  * metadata. The unified diff is preserved verbatim so callers can slice it by
