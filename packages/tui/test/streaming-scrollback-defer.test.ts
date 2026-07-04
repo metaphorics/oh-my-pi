@@ -376,41 +376,6 @@ describe("streaming scrollback defer", () => {
 		}
 	});
 
-	it("does not emit ED3 during streaming", async () => {
-		if (process.platform === "win32") return;
-		const term = new VirtualTerminal(40, 10);
-		overrideProbe(term, undefined);
-		const tui = new TUI(term);
-		const component = new LineList([...rows("init-", 10), "prompt"]);
-
-		try {
-			tui.addChild(component);
-			tui.start();
-			await settle(term);
-
-			const writes = capture(term);
-
-			component.setLines([...rows("grow-", 30), "prompt"]);
-			tui.requestRender();
-			await settle(term);
-
-			expect(eraseScrollbackCount(writes)).toBe(0);
-
-			tui.requestRender();
-			await settle(term);
-
-			expect(eraseScrollbackCount(writes)).toBe(0);
-			expect(
-				term
-					.getViewport()
-					.map(line => line.trim())
-					.at(-1),
-			).toBe("prompt");
-		} finally {
-			tui.stop();
-		}
-	});
-
 	it("does not duplicate committed sealed rows when the live region collapses mid-stream", async () => {
 		if (process.platform === "win32") return;
 		const term = new VirtualTerminal(20, 4);

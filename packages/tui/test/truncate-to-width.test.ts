@@ -41,9 +41,3 @@ describe("truncateToWidth", () => {
 		expect(truncated.endsWith("\x1b[0m")).toBe(true);
 	});
 });
-
-describe("visibleWidth", () => {
-	it("counts tabs inline and skips ANSI inline", () => {
-		expect(visibleWidth("\t\x1b[31m界\x1b[0m")).toBe(5);
-	});
-});

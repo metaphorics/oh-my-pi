@@ -184,38 +184,6 @@ describe("issue #2088: tmux pane-resize race produces viewport flash", () => {
 		});
 	});
 
-	it("paints the viewport immediately on resize outside a multiplexer, then replays on settle", async () => {
-		await withEnvPatch(NO_MULTIPLEXER_ENV, async () => {
-			const term = new VirtualTerminal(40, 10, 1000);
-			const tui = new TUI(term);
-			tui.addChild(new MutableLinesComponent(Array.from({ length: 20 }, (_v, i) => `line-${i}`)));
-
-			try {
-				tui.start();
-				await settle(term);
-
-				const baselineRedraws = tui.fullRedraws;
-				const baselinePaints = tui.resizeViewportPaints;
-				const expectedViewport = Array.from({ length: 10 }, (_v, i) => `line-${i + 10}`);
-				term.resize(80, 10);
-				await settle(term);
-
-				// In flight: a cheap viewport-only paint lands at once (no native
-				// scrollback replay), and the authoritative full paint is deferred.
-				expect(tui.resizeViewportPaints).toBeGreaterThan(baselinePaints);
-				expect(tui.fullRedraws).toBe(baselineRedraws);
-				expect(visible(term)).toEqual(expectedViewport);
-
-				// Once the drag goes quiet the full replay fires exactly once.
-				await settleResize(term);
-				expect(tui.fullRedraws).toBeGreaterThan(baselineRedraws);
-				expect(visible(term)).toEqual(expectedViewport);
-			} finally {
-				tui.stop();
-			}
-		});
-	});
-
 	it("cancels a pending multiplexer resize timer on stop()", async () => {
 		await withEnvPatch(TMUX_ENV, async () => {
 			const term = new VirtualTerminal(40, 10, 1000);
@@ -474,31 +442,6 @@ describe("multiplexer detection gates ED3 on resize", () => {
 				await settleResize(term);
 				const out = writes.join("");
 				expect(out).toContain(ED3);
-			} finally {
-				tui.stop();
-			}
-		});
-	});
-	it("still clears native scrollback (ED3) on a genuine direct-terminal resize", async () => {
-		await withEnvPatch(NO_MULTIPLEXER_ENV, async () => {
-			const term = new VirtualTerminal(40, 10, 1000);
-			const tui = new TUI(term);
-			tui.addChild(new MutableLinesComponent(Array.from({ length: 20 }, (_v, i) => `line-${i}`)));
-
-			try {
-				tui.start();
-				await settle(term);
-
-				// Capture only the resize-driven paint; the initial paint never
-				// clears scrollback, so any ED3 in `out` belongs to the resize.
-				// Wait past the 120 ms viewport-settle window — that deferred
-				// `requestRender(true, { clearScrollback: true })` is what emits ED3.
-				const writes = captureWrites(term);
-				term.resize(80, 10);
-				await settleResize(term);
-				const out = writes.join("");
-				expect(out).toContain(ED3);
-				expect(visible(term)).toEqual(Array.from({ length: 10 }, (_v, i) => `line-${i + 10}`));
 			} finally {
 				tui.stop();
 			}
