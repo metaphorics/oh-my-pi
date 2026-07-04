@@ -16,10 +16,7 @@ use std::{
 };
 
 use grep_matcher::Matcher;
-use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{
-	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
-};
+use grep_searcher::{Searcher, Sink, SinkContext, SinkContextKind, SinkMatch};
 use napi::{
 	JsString,
 	bindgen_prelude::*,
@@ -582,35 +579,27 @@ fn run_search_slice(
 
 fn build_searcher_for_params(params: SearchParams) -> Searcher {
 	let collect_content = params.mode == OutputMode::Content;
-	build_searcher(
-		if collect_content {
-			params.context_before
+	// Delegates searcher construction to pi-grep-core. `BinaryMode::Automatic`
+	// resolves to `BinaryDetection::quit(b'\0')` (text/null_data/force all off),
+	// preserving pi-natives' historical quit-on-NUL policy; the spec's other
+	// knobs default off, so `.passthru`/`.invert_match`/`.max_matches(None)` are
+	// no-ops that leave the built searcher byte-identical to the prior builder.
+	let spec = pi_grep_core::SearcherSpec {
+		line_number: collect_content,
+		before_context: if collect_content {
+			params.context_before as usize
 		} else {
 			0
 		},
-		if collect_content {
-			params.context_after
+		after_context: if collect_content {
+			params.context_after as usize
 		} else {
 			0
 		},
-		params.multiline,
-		collect_content,
-	)
-}
-
-fn build_searcher(
-	context_before: u32,
-	context_after: u32,
-	multiline: bool,
-	line_number: bool,
-) -> Searcher {
-	SearcherBuilder::new()
-		.binary_detection(BinaryDetection::quit(b'\x00'))
-		.line_number(line_number)
-		.multi_line(multiline)
-		.before_context(context_before as usize)
-		.after_context(context_after as usize)
-		.build()
+		multi_line: params.multiline,
+		..pi_grep_core::SearcherSpec::default()
+	};
+	pi_grep_core::build_searcher(&spec, pi_grep_core::BinaryMode::Automatic)
 }
 
 fn file_len_exceeds_limit(len: usize) -> bool {
@@ -956,10 +945,18 @@ fn build_regex_matcher(
 	ignore_case: bool,
 	multiline: bool,
 ) -> std::result::Result<grep_regex::RegexMatcher, grep_regex::Error> {
-	RegexMatcherBuilder::new()
-		.case_insensitive(ignore_case)
-		.multi_line(multiline)
-		.build(pattern)
+	// Delegates the leaf matcher build to pi-grep-core; the fallback ladder
+	// (brace sanitization, paren-escape retry, literal fallback) stays here in
+	// `build_matcher`. The core applies its extra `MatcherSpec` knobs at their
+	// defaults, and `build_matcher` == `build_many(&[pattern])`, so this is
+	// byte-identical (matches and error strings) to the prior single-pattern
+	// `RegexMatcherBuilder::build`.
+	let spec = pi_grep_core::MatcherSpec {
+		case_insensitive: ignore_case,
+		multi_line: multiline,
+		..pi_grep_core::MatcherSpec::default()
+	};
+	pi_grep_core::build_matcher(std::slice::from_ref(&pattern.to_owned()), &spec)
 }
 
 fn build_matcher(

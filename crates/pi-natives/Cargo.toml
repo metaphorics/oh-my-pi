@@ -35,6 +35,7 @@ parking_lot.workspace = true
 phf.workspace = true
 flume.workspace = true
 pi-ast.workspace = true
+pi-grep-core = { path = "../pi-grep-core" }
 pi-iso.workspace = true
 pi-shell.workspace = true
 pi-walker.workspace = true
