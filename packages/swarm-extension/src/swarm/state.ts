@@ -11,8 +11,8 @@ import * as path from "node:path";
 // State types
 // ============================================================================
 
-type PipelineStatus = "idle" | "running" | "completed" | "failed" | "aborted";
-type AgentStatus = "pending" | "waiting" | "running" | "completed" | "failed";
+export type PipelineStatus = "idle" | "running" | "completed" | "failed" | "aborted";
+export type AgentStatus = "pending" | "waiting" | "running" | "completed" | "failed";
 
 export interface AgentState {
 	name: string;
