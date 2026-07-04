@@ -3003,6 +3003,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-grep-core"
+version = "16.3.4"
+dependencies = [
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "pi-walker",
+]
+
+[[package]]
 name = "pi-grep-testkit"
 version = "16.3.4"
 

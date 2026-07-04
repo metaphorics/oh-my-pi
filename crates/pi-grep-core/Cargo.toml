@@ -1,0 +1,28 @@
+# Engine-neutral grep core: the matcher/searcher/walk builders shared by the
+# in-process `rg` builtin (pi-uu-grep) and, from T12, the N-API grep engine
+# (pi-natives). Deliberately depends on neither `pi-uutils-ctx` nor any other
+# shell-builtin thread-local context — cancellation is injected by the caller as
+# a plain `Fn() -> bool`, so the crate stays reusable across both consumers.
+[package]
+name = "pi-grep-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Intentionally does NOT inherit `[lints] workspace = true`: this code is
+# extracted verbatim from pi-uu-grep, which is held to default clippy rather than
+# the workspace pedantic/nursery set. Matching the origin crate's lint policy
+# keeps the extraction byte-for-byte and warning-clean. Revisit if pi-uu-grep
+# adopts the workspace lints.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+grep-matcher.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
+pi-walker.workspace = true
