@@ -3032,11 +3032,9 @@ dependencies = [
 name = "pi-natives"
 version = "16.3.6"
 dependencies = [
- "anyhow",
  "arboard",
  "ast-grep-core",
  "base64",
- "clap",
  "flume",
  "fontdue",
  "globset",
@@ -3045,7 +3043,6 @@ dependencies = [
  "grep-searcher",
  "html-to-markdown-rs",
  "icy_sixel",
- "ignore",
  "image",
  "inferno",
  "libc",
@@ -3066,20 +3063,12 @@ dependencies = [
  "portable-pty",
  "rayon",
  "regex",
- "serde",
- "serde_json",
- "similar 3.1.1",
  "smallvec",
  "syntect",
  "tiktoken-rs",
  "tokio",
- "tokio-util",
- "toml",
  "unicode-segmentation",
  "unicode-width 0.2.2",
- "windows-sys 0.61.2",
- "winreg 0.56.0",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -3119,7 +3108,6 @@ dependencies = [
  "uu_tail",
  "uu_uniq",
  "uu_wc",
- "windows-sys 0.61.2",
  "winreg 0.56.0",
  "xxhash-rust",
 ]
@@ -3139,7 +3127,6 @@ dependencies = [
  "globset",
  "ignore",
  "libc",
- "parking_lot",
  "rayon",
  "windows-sys 0.61.2",
 ]

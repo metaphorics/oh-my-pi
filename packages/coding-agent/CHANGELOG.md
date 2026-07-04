@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed unreferenced SDK/extension example files (`examples/sdk/06-extensions.ts`, `examples/sdk/08-prompt-templates.ts`, `examples/sdk/12-redis-sessions.ts`, `examples/sdk/13-sql-sessions.ts`, `examples/extensions/api-demo.ts`, `examples/extensions/reload-runtime.ts`) identified as unused by knip. ([#4546](https://github.com/can1357/oh-my-pi/pull/4546))
 ## [16.3.6] - 2026-07-04
 
 ### Changed
