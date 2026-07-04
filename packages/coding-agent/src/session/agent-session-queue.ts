@@ -1,7 +1,7 @@
-// Extracted from agent-session.ts (T14, Op: compress). Queued-message
-// classification + restoration helpers: identify user-authored vs agent-authored
-// queued cards, hidden magic-keyword companions, and the editor-restorable chip
-// text. Pure functions over AgentMessage; no session state.
+// Queued-message classification + restoration helpers: identify
+// user-authored vs agent-authored queued cards, hidden magic-keyword
+// companions, and the editor-restorable chip text. Pure functions over
+// AgentMessage; no session state.
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { type CustomMessage, readQueueChipText } from "./messages";

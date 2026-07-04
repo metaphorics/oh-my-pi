@@ -1,5 +1,5 @@
-// Extracted from agent-session.ts (T14, Op: compress). Public session type
-// vocabulary. Re-exported verbatim by the ./agent-session facade.
+// Public session type vocabulary. Re-exported verbatim by the
+// ./agent-session facade.
 import type { Agent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,

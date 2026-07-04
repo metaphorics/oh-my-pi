@@ -1,7 +1,7 @@
-// Extracted from agent-session.ts (T14, Op: compress). ACP permission-gate
-// pure helpers: which tools are gated, the option set presented to the client,
-// and the arg-introspection that derives permission intent + affected paths.
-// No session state; consumed by AgentSession via import.
+// ACP permission-gate pure helpers: which tools are gated, the option set
+// presented to the client, and the arg-introspection that derives permission
+// intent + affected paths. No session state; consumed by AgentSession via
+// import.
 import { Patch } from "@oh-my-pi/hashline";
 import { expandApplyPatchToEntries } from "../edit";
 import { resolveToCwd } from "../tools/path-utils";
