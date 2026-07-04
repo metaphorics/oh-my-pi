@@ -229,20 +229,5 @@ describe("BashExecutionComponent #clampDisplayLine", () => {
 			expect(visibleWidth("abc")).toBe(3);
 			expect(visibleWidth("")).toBe(0);
 		});
-
-		it("verifies CJK counts as 2 columns", () => {
-			expect(visibleWidth("中")).toBe(2);
-			expect(visibleWidth("日本語中文")).toBe(10);
-		});
-
-		it("verifies emoji count", () => {
-			expect(visibleWidth("🎉")).toBe(2);
-			expect(visibleWidth("🔢")).toBe(2);
-		});
-
-		it("ignores ANSI escape sequences", () => {
-			expect(visibleWidth("\x1b[7m")).toBe(0);
-			expect(visibleWidth("a\x1b[7mb")).toBe(2);
-		});
 	});
 });

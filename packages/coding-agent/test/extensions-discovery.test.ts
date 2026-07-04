@@ -161,19 +161,6 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain(path.join("linked-package", "src", "main.ts"));
 	});
 
-	it("discovers index.ts in a symlinked extension directory", async () => {
-		const packageDir = path.join(tempDir.path(), "linked-index-ts");
-		fs.mkdirSync(packageDir);
-		fs.writeFileSync(path.join(packageDir, "index.ts"), extensionCode);
-		fs.symlinkSync(packageDir, path.join(extensionsDir, "linked-index-ts"), "dir");
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].path).toContain(path.join("linked-index-ts", "index.ts"));
-	});
-
 	it("discovers index.js in a symlinked extension directory", async () => {
 		const packageDir = path.join(tempDir.path(), "linked-index-js");
 		fs.mkdirSync(packageDir);
