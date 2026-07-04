@@ -122,7 +122,7 @@ struct Cli {
 	quiet: bool,
 
 	/// Print a help message.
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "field never read; clap ArgAction handles the flag")]
 	#[arg(long = "help", action = clap::ArgAction::Help)]
 	help: Option<bool>,
 
@@ -131,7 +131,7 @@ struct Cli {
 	/// GNU grep ships a `--version`, and shell startup scripts probe it.
 	/// Routed through clap so output lands on the in-process stdout via the
 	/// same path as `--help`.
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "field never read; clap ArgAction handles the flag")]
 	#[arg(short = 'V', long = "version", action = clap::ArgAction::Version)]
 	version: Option<bool>,
 
@@ -140,7 +140,7 @@ struct Cli {
 	/// (often a pipe consumed by another tool), so injecting ANSI escapes
 	/// would corrupt downstream output. The common `alias grep='grep
 	/// --color=auto'` from distro bashrc files passes through unchanged.
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "accepted for GNU grep alias compat, intentionally ignored")]
 	#[arg(
 		long = "color",
 		alias = "colour",
