@@ -56,8 +56,6 @@ libc.workspace = true
 
 [dev-dependencies]
 pi-grep-testkit = { path = "../pi-grep-testkit" }
-[dev-dependencies]
-pi-grep-testkit = { path = "../pi-grep-testkit" }
 
 [build-dependencies]
 napi-build.workspace = true
