@@ -182,4 +182,63 @@ describe("Nomnoml SVG assistant rendering", () => {
 		expect(new Set(budget.keys).size).toBe(2);
 		expect(budget.keys.every(key => key?.startsWith("nomnoml:"))).toBe(true);
 	});
+
+	it("uses unique image placement keys for nomnoml sources in separate content blocks", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const imageUpdated = Promise.withResolvers<void>();
+		const budget = new RecordingImageBudget(10);
+		const fence = "```nomnoml\n[A] -> [B]\n```";
+		const message = createAssistantMessage(fence);
+		message.content = [
+			{ type: "text", text: fence },
+			{ type: "text", text: fence },
+		];
+		new AssistantMessageComponent(message, false, imageUpdated.resolve, [], budget);
+		await imageUpdated.promise;
+		expect(rasterSpy).toHaveBeenCalledTimes(1);
+		expect(budget.keys).toHaveLength(2);
+		expect(new Set(budget.keys).size).toBe(2);
+	});
+
+	it("uses unique image placement keys for identical nomnoml sources across assistant turns", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const firstUpdated = Promise.withResolvers<void>();
+		const secondUpdated = Promise.withResolvers<void>();
+		const budget = new RecordingImageBudget(10);
+		const fence = "```nomnoml\n[A] -> [B]\n```";
+		new AssistantMessageComponent(createAssistantMessage(fence), false, firstUpdated.resolve, [], budget);
+		new AssistantMessageComponent(createAssistantMessage(fence), false, secondUpdated.resolve, [], budget);
+		await Promise.all([firstUpdated.promise, secondUpdated.promise]);
+		expect(budget.keys).toHaveLength(2);
+		expect(new Set(budget.keys).size).toBe(2);
+	});
+
+	it("suppresses nomnoml images when showImages is false", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const budget = new RecordingImageBudget(10);
+		const fence = "```nomnoml\n[A] -> [B]\n```";
+		const component = new AssistantMessageComponent(
+			createAssistantMessage(fence),
+			false,
+			undefined,
+			[],
+			budget,
+			true,
+			false,
+		);
+		// Give any accidental async queue a turn to fire before asserting.
+		await Promise.resolve();
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rasterSpy).not.toHaveBeenCalled();
+		expect(budget.keys).toHaveLength(0);
+		expect(rendered).toContain("A");
+		expect(rendered).toContain("B");
+		expect(rendered).not.toContain("[Image:");
+	});
 });

@@ -65,6 +65,7 @@ export interface ChatTranscriptBuilderDeps {
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	requestRender: () => void;
+	showImages?: boolean;
 }
 
 /** Extracts the plain-text content of a user message (string or text blocks). */
@@ -280,6 +281,7 @@ export class ChatTranscriptBuilder {
 			this.deps.getMessageRenderer ? undefined : [], // placeholder for thinkingRenderers
 			undefined, // placeholder for imageBudget
 			proseOnlyThinking,
+			this.deps.showImages ?? false,
 		);
 		this.container.addChild(assistantComponent);
 

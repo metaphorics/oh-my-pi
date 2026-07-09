@@ -49,6 +49,7 @@ const nomnomlRuntime = nomnoml as NomnomlRuntime;
 
 const MAX_CANVAS_CELLS = 40_000;
 const MAX_DIMENSION = 400;
+const WIDE_CONTINUATION_CELL = "\0";
 
 class CharGrid {
 	#cells: string[][];
@@ -64,8 +65,21 @@ class CharGrid {
 		if (x < 0 || y < 0 || x >= this.width || y >= this.height) return;
 		const row = this.#cells[y];
 		if (!row) return;
-		const current = row[x] ?? " ";
-		row[x] = mergeChars(current, char);
+		const previous = row[x];
+		const current = previous === WIDE_CONTINUATION_CELL ? " " : (previous ?? " ");
+		const next = mergeChars(current, char);
+		row[x] = next;
+		const width = Bun.stringWidth(next);
+		// If a narrower glyph replaced a wider one at this leading cell, clear the
+		// now-orphaned continuation sentinels it used to own.
+		const previousWidth = previous && previous !== WIDE_CONTINUATION_CELL ? Bun.stringWidth(previous) : 1;
+		for (let dx = Math.max(1, width); dx < previousWidth && x + dx < this.width; dx++) {
+			if (row[x + dx] === WIDE_CONTINUATION_CELL) row[x + dx] = " ";
+		}
+		if (width <= 1) return;
+		for (let dx = 1; dx < width && x + dx < this.width; dx++) {
+			row[x + dx] = WIDE_CONTINUATION_CELL;
+		}
 	}
 
 	text(x: number, y: number, text: string): void {
@@ -89,7 +103,8 @@ class CharGrid {
 			const row = this.#cells[y];
 			if (!row) continue;
 			for (let x = 0; x < row.length; x++) {
-				if ((row[x] ?? " ") !== " ") {
+				const cell = row[x] ?? " ";
+				if (cell !== " " && cell !== WIDE_CONTINUATION_CELL) {
 					left = Math.min(left, x);
 					right = Math.max(right, x);
 				}
@@ -104,6 +119,7 @@ class CharGrid {
 			result.push(
 				row
 					.slice(left, right + 1)
+					.filter(cell => cell !== WIDE_CONTINUATION_CELL)
 					.join("")
 					.trimEnd(),
 			);
@@ -113,7 +129,7 @@ class CharGrid {
 }
 
 function rowEmpty(row: string[] | undefined): boolean {
-	return row === undefined || row.every(char => char === " ");
+	return row === undefined || row.every(char => char === " " || char === WIDE_CONTINUATION_CELL);
 }
 
 function isHorizontal(char: string): boolean {
@@ -215,6 +231,7 @@ function drawNode(grid: CharGrid, node: LayoutNode): void {
 }
 
 function drawAssociationLines(grid: CharGrid, assoc: Association): void {
+	if (assoc.type === "-/-") return;
 	const points = assoc.path ?? assoc.points ?? [];
 	if (points.length < 2) return;
 	for (let i = 1; i < points.length; i++) {
@@ -226,6 +243,7 @@ function drawAssociationLines(grid: CharGrid, assoc: Association): void {
 }
 
 function drawAssociationDecorations(grid: CharGrid, assoc: Association): void {
+	if (assoc.type === "-/-") return;
 	const points = assoc.path ?? assoc.points ?? [];
 	if (points.length < 2) return;
 	const type = assoc.type ?? "";

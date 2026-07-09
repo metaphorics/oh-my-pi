@@ -77,7 +77,6 @@ type TopLevelNomnomlBlock = {
 	start: number;
 	end: number;
 	rasterKey: string;
-	imageKey: string;
 };
 
 type TextNomnomlSegment =
@@ -88,8 +87,8 @@ function nomnomlRasterKey(source: string): string {
 	return `nomnoml:${Bun.hash(source)}`;
 }
 
-function nomnomlImageKey(rasterKey: string, occurrence: number, start: number): string {
-	return `${rasterKey}:${occurrence}:${start}`;
+function nomnomlImageKey(rasterKey: string, placementScope: string, occurrence: number, start: number): string {
+	return `${rasterKey}:${placementScope}:${occurrence}:${start}`;
 }
 
 function findTopLevelNomnomlBlocks(text: string): TopLevelNomnomlBlock[] {
@@ -116,7 +115,6 @@ function findTopLevelNomnomlBlocks(text: string): TopLevelNomnomlBlock[] {
 								start: fence.start,
 								end: offset,
 								rasterKey,
-								imageKey: nomnomlImageKey(rasterKey, blocks.length, fence.start),
 							});
 						}
 					}
@@ -139,15 +137,27 @@ function findTopLevelNomnomlBlocks(text: string): TopLevelNomnomlBlock[] {
 	return blocks;
 }
 
-function splitNomnomlImages(text: string, pngByKey: ReadonlyMap<string, string>): TextNomnomlSegment[] {
+function splitNomnomlImages(
+	text: string,
+	pngByKey: ReadonlyMap<string, string>,
+	placementScope: string,
+): TextNomnomlSegment[] {
 	const segments: TextNomnomlSegment[] = [];
 	let lastIndex = 0;
-	for (const block of findTopLevelNomnomlBlocks(text)) {
+	const blocks = findTopLevelNomnomlBlocks(text);
+	for (let occurrence = 0; occurrence < blocks.length; occurrence++) {
+		const block = blocks[occurrence];
+		if (!block) continue;
 		const data = pngByKey.get(block.rasterKey);
 		if (!data) continue;
 		const before = text.slice(lastIndex, block.start).trim();
 		if (before) segments.push({ type: "markdown", text: before });
-		segments.push({ type: "image", key: block.imageKey, data, mimeType: "image/png" });
+		segments.push({
+			type: "image",
+			key: nomnomlImageKey(block.rasterKey, placementScope, occurrence, block.start),
+			data,
+			mimeType: "image/png",
+		});
 		lastIndex = block.end;
 	}
 	const after = text.slice(lastIndex).trim();
@@ -252,6 +262,10 @@ function lerpHex(from: string, to: string, t: number): string {
 /**
  * Component that renders a complete assistant message
  */
+// Stable per-instance prefix so assistant nomnoml image placements do not collide
+// across assistant turns that share one terminal ImageBudget.
+let assistantMessageComponentInstanceSeq = 0;
+
 export class AssistantMessageComponent extends Container {
 	#contentContainer: Container;
 	#markerSlot: Container;
@@ -261,6 +275,8 @@ export class AssistantMessageComponent extends Container {
 	#kittyConversionsInFlight = new Set<string>();
 	#nomnomlPngByKey = new Map<string, string>();
 	#nomnomlPngInFlight = new Set<string>();
+	readonly #instanceId = ++assistantMessageComponentInstanceSeq;
+	#showImages = true;
 	#transcriptBlockFinalized: boolean;
 	/**
 	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
@@ -328,8 +344,10 @@ export class AssistantMessageComponent extends Container {
 		private readonly thinkingRenderers: readonly AssistantThinkingRenderer[] = [],
 		private readonly imageBudget?: ImageBudget,
 		private proseOnlyThinking = true,
+		showImages = true,
 	) {
 		super();
+		this.#showImages = showImages;
 		this.#transcriptBlockFinalized = message !== undefined;
 
 		// Slim cache-invalidation divider, populated above the content when this
@@ -786,7 +804,12 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#queueNomnomlPngs(message: AssistantMessage): void {
-		if (this.#lastUpdateTransient || !TERMINAL.imageProtocol || getMarkdownNomnomlRendering() !== "svg") {
+		if (
+			!this.#showImages ||
+			this.#lastUpdateTransient ||
+			!TERMINAL.imageProtocol ||
+			getMarkdownNomnomlRendering() !== "svg"
+		) {
 			return;
 		}
 		for (const content of message.content) {
@@ -914,14 +937,17 @@ export class AssistantMessageComponent extends Container {
 		// Render content in order
 		let thinkingIndex = 0;
 		const renderNomnomlImages =
-			!this.#lastUpdateTransient && !!TERMINAL.imageProtocol && getMarkdownNomnomlRendering() === "svg";
+			this.#showImages &&
+			!this.#lastUpdateTransient &&
+			!!TERMINAL.imageProtocol &&
+			getMarkdownNomnomlRendering() === "svg";
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
 				const segments: TextNomnomlSegment[] = renderNomnomlImages
-					? splitNomnomlImages(trimmed, this.#nomnomlPngByKey)
+					? splitNomnomlImages(trimmed, this.#nomnomlPngByKey, `am${this.#instanceId}:${i}`)
 					: [{ type: "markdown", text: trimmed }];
 				for (const segment of segments) {
 					if (segment.type === "markdown") {
