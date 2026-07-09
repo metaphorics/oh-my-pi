@@ -1479,7 +1479,6 @@ describe("ModelRegistry", () => {
 			expect(requestedUrls).toContain("https://copilot-api.ghe.example.com/models");
 			expect(requestedUrls).not.toContain("https://api.githubcopilot.com/models");
 		});
-
 	});
 
 	describe("built-in OAuth discovery auto-refresh", () => {
@@ -1526,7 +1525,6 @@ describe("ModelRegistry", () => {
 			delete Bun.env.XAI_OAUTH_TOKEN;
 			delete Bun.env.XAI_API_KEY;
 
-			let spy: any;
 			try {
 				await authStorage.set("xai-oauth", [
 					{
@@ -1537,11 +1535,11 @@ describe("ModelRegistry", () => {
 					},
 				]);
 
-				let capturedAuthHeader: string | null = null;
+				const captured: { authHeader: string | null } = { authHeader: null };
 				const fetchMock: FetchImpl = async (input, init) => {
 					const url = input instanceof Request ? input.url : String(input);
 					if (url === "https://api.x.ai/v1/models") {
-						capturedAuthHeader =
+						captured.authHeader =
 							input instanceof Request
 								? input.headers.get("Authorization")
 								: new Headers(init?.headers).get("Authorization");
@@ -1555,9 +1553,7 @@ describe("ModelRegistry", () => {
 					throw new Error(`Unexpected URL: ${url}`);
 				};
 
-				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-
-				spy = spyOn(authStorage, "getApiKey").mockImplementation(async () => {
+				const spy = spyOn(authStorage, "getApiKey").mockImplementation(async () => {
 					await authStorage.set("xai-oauth", [
 						{
 							type: "oauth",
@@ -1569,12 +1565,16 @@ describe("ModelRegistry", () => {
 					return "fresh-access";
 				});
 
-				await registry.refreshProvider("xai-oauth", "online");
+				try {
+					const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+					await registry.refreshProvider("xai-oauth", "online");
 
-				expect(spy).toHaveBeenCalled();
-				expect(capturedAuthHeader).toBe("Bearer fresh-access");
+					expect(spy).toHaveBeenCalled();
+					expect(captured.authHeader).toBe("Bearer fresh-access");
+				} finally {
+					spy.mockRestore();
+				}
 			} finally {
-				spy?.mockRestore();
 				if (originalXaiOAuthToken === undefined) {
 					delete Bun.env.XAI_OAUTH_TOKEN;
 				} else {
@@ -1594,23 +1594,24 @@ describe("ModelRegistry", () => {
 			delete Bun.env.XAI_OAUTH_TOKEN;
 			delete Bun.env.XAI_API_KEY;
 
-			let spy: any;
 			try {
-				const fetchMock: FetchImpl = async (input, init) => {
+				const fetchMock: FetchImpl = async () => {
 					throw new Error(`Should not fetch because discovery is skipped`);
 				};
 
-				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-
-				spy = spyOn(authStorage, "getApiKey").mockImplementation(async () => {
+				const spy = spyOn(authStorage, "getApiKey").mockImplementation(async () => {
 					return "fresh-access";
 				});
 
-				await registry.refreshProvider("xai-oauth", "online");
+				try {
+					const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+					await registry.refreshProvider("xai-oauth", "online");
 
-				expect(spy).not.toHaveBeenCalled();
+					expect(spy).not.toHaveBeenCalled();
+				} finally {
+					spy.mockRestore();
+				}
 			} finally {
-				spy?.mockRestore();
 				if (originalXaiOAuthToken === undefined) {
 					delete Bun.env.XAI_OAUTH_TOKEN;
 				} else {
