@@ -1479,6 +1479,43 @@ describe("ModelRegistry", () => {
 			expect(requestedUrls).toContain("https://copilot-api.ghe.example.com/models");
 			expect(requestedUrls).not.toContain("https://api.githubcopilot.com/models");
 		});
+
+		test("expired xai-oauth credentials whose refresh rejects does not crash built-in discovery", async () => {
+			const originalXaiOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
+			const originalXaiApiKey = Bun.env.XAI_API_KEY;
+			delete Bun.env.XAI_OAUTH_TOKEN;
+			delete Bun.env.XAI_API_KEY;
+
+			try {
+				await authStorage.set("xai-oauth", [
+					{
+						type: "oauth",
+						access: "expired-access-token",
+						refresh: "expired-refresh-token",
+						expires: Date.now() - 60_000,
+					},
+				]);
+
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				const spy = spyOn(registry, "getApiKeyForProvider").mockImplementation(() =>
+					Promise.reject(new Error("Mocked refresh failure")),
+				);
+
+				await registry.refreshProvider("xai-oauth", "online");
+				expect(spy).toHaveBeenCalledWith("xai-oauth");
+			} finally {
+				if (originalXaiOAuthToken === undefined) {
+					delete Bun.env.XAI_OAUTH_TOKEN;
+				} else {
+					Bun.env.XAI_OAUTH_TOKEN = originalXaiOAuthToken;
+				}
+				if (originalXaiApiKey === undefined) {
+					delete Bun.env.XAI_API_KEY;
+				} else {
+					Bun.env.XAI_API_KEY = originalXaiApiKey;
+				}
+			}
+		});
 	});
 
 	describe("disabled provider filtering", () => {
