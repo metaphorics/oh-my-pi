@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added native SVG-to-PNG rasterization for inline terminal image rendering.
+
 ## [16.3.12] - 2026-07-08
 
 ### Fixed

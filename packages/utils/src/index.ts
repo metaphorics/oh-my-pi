@@ -15,6 +15,7 @@ export * as logger from "./logger";
 export * from "./loop-phase";
 export * from "./mermaid-ascii";
 export * from "./mime";
+export * from "./nomnoml";
 export * from "./path";
 export * from "./path-tree";
 export * from "./peek-file";

@@ -30,6 +30,7 @@ import {
 	previewTheme,
 	setColorBlindMode,
 	setMarkdownMermaidRendering,
+	setMarkdownNomnomlRendering,
 	setSymbolPreset,
 	setTheme,
 	theme,
@@ -460,6 +461,14 @@ export class SelectorController {
 				setMarkdownMermaidRendering(value as boolean);
 				this.ctx.session.refreshBaseSystemPrompt().catch(err => {
 					this.ctx.showError(`Failed to apply Mermaid rendering setting: ${err}`);
+				});
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.ui.resetDisplay();
+				break;
+			case "tui.renderNomnoml":
+				setMarkdownNomnomlRendering(value as "off" | "svg" | "ascii");
+				this.ctx.session.refreshBaseSystemPrompt().catch(err => {
+					this.ctx.showError(`Failed to apply Nomnoml rendering setting: ${err}`);
 				});
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.ui.resetDisplay();

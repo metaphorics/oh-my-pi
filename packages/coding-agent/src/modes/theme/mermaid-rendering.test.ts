@@ -2,7 +2,13 @@ import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { Markdown } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../config/settings";
 import { buildSystemPrompt } from "../../system-prompt";
-import { getMarkdownTheme, getThemeByName, setMarkdownMermaidRendering, setThemeInstance } from "./theme";
+import {
+	getMarkdownTheme,
+	getThemeByName,
+	setMarkdownMermaidRendering,
+	setMarkdownNomnomlRendering,
+	setThemeInstance,
+} from "./theme";
 
 const workspaceTree = {
 	rootPath: "/tmp/project",
@@ -25,6 +31,7 @@ beforeAll(async () => {
 
 afterEach(() => {
 	setMarkdownMermaidRendering(true);
+	setMarkdownNomnomlRendering("off");
 });
 
 describe("Mermaid rendering setting", () => {
@@ -49,5 +56,41 @@ describe("Mermaid rendering setting", () => {
 		expect(lines).toContain("```mermaid");
 		expect(lines).toContain("graph TD");
 		expect(lines).toContain("-->");
+	});
+
+	it("uses the Nomnoml prompt hint instead of Mermaid when Nomnoml rendering is enabled", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			renderMermaid: true,
+			renderNomnoml: true,
+			contextFiles: [],
+			skills: [],
+			toolNames: [],
+			workspaceTree,
+		});
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).toContain("```nomnoml");
+		expect(prompt).not.toContain("```mermaid");
+	});
+
+	it("exposes Nomnoml ASCII fallback in SVG mode and renders Mermaid as code", () => {
+		setMarkdownMermaidRendering(true);
+		setMarkdownNomnomlRendering("svg");
+
+		const theme = getMarkdownTheme();
+		const ascii = theme.resolveNomnomlAscii?.("[A] -> [B]", 80);
+		expect(ascii).toContain("A");
+		expect(ascii).toContain("B");
+
+		const nomnoml = stripAnsi(new Markdown("```nomnoml\n[A] -> [B]\n```", 0, 0, theme).render(80).join("\n"));
+		expect(nomnoml).not.toContain("```nomnoml");
+		expect(nomnoml).toContain("A");
+		expect(nomnoml).toContain("B");
+
+		const mermaid = stripAnsi(
+			new Markdown("```mermaid\ngraph TD\n  A --> B\n```", 0, 0, theme).render(80).join("\n"),
+		);
+		expect(mermaid).toContain("```mermaid");
+		expect(mermaid).toContain("graph TD");
 	});
 });

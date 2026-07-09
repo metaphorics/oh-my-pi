@@ -845,6 +845,27 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.renderNomnoml": {
+		type: "enum",
+		values: ["off", "svg", "ascii"] as const,
+		default: "svg",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Render Nomnoml Diagrams",
+			description: "Render nomnoml fenced code blocks as diagrams (replaces the Mermaid hint while active)",
+			options: [
+				{ value: "off", label: "Off", description: "Highlight nomnoml fences as plain code" },
+				{
+					value: "svg",
+					label: "SVG image",
+					description: "Rasterize to an inline terminal image; falls back to ASCII without image support",
+				},
+				{ value: "ascii", label: "ASCII", description: "Render as ASCII diagrams inline in markdown" },
+			],
+		},
+	},
+
 	"tui.hyperlinks": {
 		type: "enum",
 		values: ["off", "auto", "always"] as const,

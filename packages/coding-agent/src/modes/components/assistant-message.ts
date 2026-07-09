@@ -3,6 +3,7 @@ import { Container, Image, type ImageBudget, ImageProtocol, Markdown, Spacer, TE
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
+import { getMarkdownNomnomlRendering, resolveNomnomlPng } from "../../modes/theme/nomnoml-cache";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
@@ -39,12 +40,12 @@ function resolveThinkingDisplay(block: ThinkingContentBlock, proseOnly: boolean)
 }
 
 /**
- * Whether `text` contains a ` ```mermaid ` fence (open or closed) outside
- * ordinary code fences. Mermaid defers native-scrollback settling wholesale
- * (see {@link AssistantMessageComponent.getTranscriptBlockSettledRows}): its
- * ASCII rendering resolves asynchronously, so even a completed fence can
- * re-layout rows that already looked settled. Fence-aware so a mermaid
- * example inside a regular code block never triggers the deferral.
+ * Whether `text` contains a ` ```mermaid ` or ` ```nomnoml ` fence (open or
+ * closed) outside ordinary code fences. Diagram renderers defer native-scrollback
+ * settling wholesale (see {@link AssistantMessageComponent.getTranscriptBlockSettledRows}):
+ * their rendering can resolve asynchronously, so even a completed fence can
+ * re-layout rows that already looked settled. Fence-aware so examples inside a
+ * regular code block never trigger the deferral.
  */
 function containsMermaidFence(text: string): boolean {
 	let fence: string | null = null;
@@ -52,22 +53,51 @@ function containsMermaidFence(text: string): boolean {
 		const fenceMatch = CODE_FENCE_LINE.exec(line);
 		if (fence !== null) {
 			// Inside a code block: only a bare matching closing fence ends it.
-			if (
-				fenceMatch &&
-				fenceMatch[2]!.trim() === "" &&
-				fenceMatch[1]![0] === fence[0] &&
-				fenceMatch[1]!.length >= fence.length
-			) {
-				fence = null;
+			if (fenceMatch) {
+				const marker = fenceMatch[1] ?? "";
+				const info = fenceMatch[2] ?? "";
+				if (info.trim() === "" && marker[0] === fence[0] && marker.length >= fence.length) {
+					fence = null;
+				}
 			}
 			continue;
 		}
 		if (fenceMatch) {
-			if (/^mermaid\b/.test(fenceMatch[2]!.trim())) return true;
-			fence = fenceMatch[1]!;
+			const marker = fenceMatch[1] ?? "";
+			const info = fenceMatch[2] ?? "";
+			if (/^(?:mermaid|nomnoml)\b/.test(info.trim())) return true;
+			fence = marker;
 		}
 	}
 	return false;
+}
+
+const NOMNOML_BLOCK = /```nomnoml[^\n]*\n([\s\S]*?)```/g;
+
+type TextNomnomlSegment =
+	| { type: "markdown"; text: string }
+	| { type: "image"; key: string; data: string; mimeType: "image/png" };
+
+function nomnomlImageKey(source: string): string {
+	return `nomnoml:${Bun.hash(source)}`;
+}
+
+function splitNomnomlImages(text: string, pngByKey: ReadonlyMap<string, string>): TextNomnomlSegment[] {
+	const segments: TextNomnomlSegment[] = [];
+	let lastIndex = 0;
+	for (let match = NOMNOML_BLOCK.exec(text); match !== null; match = NOMNOML_BLOCK.exec(text)) {
+		const source = match[1]?.trim() ?? "";
+		const key = nomnomlImageKey(source);
+		const data = pngByKey.get(key);
+		if (!data) continue;
+		const before = text.slice(lastIndex, match.index).trim();
+		if (before) segments.push({ type: "markdown", text: before });
+		segments.push({ type: "image", key, data, mimeType: "image/png" });
+		lastIndex = NOMNOML_BLOCK.lastIndex;
+	}
+	const after = text.slice(lastIndex).trim();
+	if (after) segments.push({ type: "markdown", text: after });
+	return segments.length === 0 ? [{ type: "markdown", text: text.trim() }] : segments;
 }
 
 /**
@@ -174,6 +204,8 @@ export class AssistantMessageComponent extends Container {
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
 	#convertedKittyImages = new Map<string, ImageContent>();
 	#kittyConversionsInFlight = new Set<string>();
+	#nomnomlPngByKey = new Map<string, string>();
+	#nomnomlPngInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
 	/**
 	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
@@ -622,7 +654,7 @@ export class AssistantMessageComponent extends Container {
 		for (const content of message.content) {
 			if (content.type === "toolCall") return false;
 		}
-		if (this.#toolImagesByCallId.size > 0) return false;
+		if (this.#toolImagesByCallId.size > 0 || this.#nomnomlPngByKey.size > 0) return false;
 		const errorPresentation = resolveAssistantErrorPresentation(message);
 		if (errorPresentation.kind === "compact-recovered") return false;
 		if (errorPresentation.kind === "full" && !(message.stopReason === "error" && this.#errorPinned)) {
@@ -698,6 +730,62 @@ export class AssistantMessageComponent extends Container {
 		return true;
 	}
 
+	#queueNomnomlPngs(message: AssistantMessage): void {
+		if (
+			this.#lastUpdateTransient ||
+			TERMINAL.imageProtocol === undefined ||
+			getMarkdownNomnomlRendering() !== "svg"
+		) {
+			return;
+		}
+		for (const content of message.content) {
+			if (content.type !== "text") continue;
+			NOMNOML_BLOCK.lastIndex = 0;
+			for (let match = NOMNOML_BLOCK.exec(content.text); match !== null; match = NOMNOML_BLOCK.exec(content.text)) {
+				const source = match[1]?.trim() ?? "";
+				if (!source) continue;
+				const key = nomnomlImageKey(source);
+				if (this.#nomnomlPngByKey.has(key) || this.#nomnomlPngInFlight.has(key)) continue;
+				this.#nomnomlPngInFlight.add(key);
+				resolveNomnomlPng(source)
+					.then(data => {
+						this.#nomnomlPngInFlight.delete(key);
+						if (!data) return;
+						this.#nomnomlPngByKey.set(key, data);
+						if (this.#lastMessage) {
+							this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+						}
+						this.onImageUpdate?.();
+					})
+					.catch(() => {
+						this.#nomnomlPngInFlight.delete(key);
+					});
+			}
+		}
+	}
+
+	#appendNomnomlImage(segment: Extract<TextNomnomlSegment, { type: "image" }>): void {
+		this.#contentContainer.addChild(
+			new Image(
+				segment.data,
+				segment.mimeType,
+				{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
+				{ ...resolveImageOptions(), budget: this.imageBudget, imageKey: segment.key },
+			),
+		);
+	}
+
+	#appendMarkdownText(
+		text: string,
+		contentIndex: number,
+		captureItems?: Array<{ md: Markdown; contentIndex: number; blockType: "text" | "thinking"; lastText: string }>,
+	): void {
+		const md = new Markdown(text, 1, 0, getMarkdownTheme());
+		md.transientRenderCache = this.#lastUpdateTransient;
+		this.#contentContainer.addChild(md);
+		captureItems?.push({ md, contentIndex, blockType: "text", lastText: text });
+	}
+
 	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
 		this.#blockVersion++;
 		this.#lastMessage = message;
@@ -753,6 +841,8 @@ export class AssistantMessageComponent extends Container {
 			return false;
 		});
 
+		this.#queueNomnomlPngs(message);
+
 		// Fast path: reuse Markdown children when shape is stable during streaming
 		if (this.#tryFastPathUpdate(message, opts)) return;
 
@@ -776,15 +866,23 @@ export class AssistantMessageComponent extends Container {
 
 		// Render content in order
 		let thinkingIndex = 0;
+		const renderNomnomlImages =
+			!this.#lastUpdateTransient && TERMINAL.imageProtocol !== undefined && getMarkdownNomnomlRendering() === "svg";
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme());
-				md.transientRenderCache = this.#lastUpdateTransient;
-				this.#contentContainer.addChild(md);
-				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				const segments: TextNomnomlSegment[] = renderNomnomlImages
+					? splitNomnomlImages(trimmed, this.#nomnomlPngByKey)
+					: [{ type: "markdown", text: trimmed }];
+				for (const segment of segments) {
+					if (segment.type === "markdown") {
+						this.#appendMarkdownText(segment.text, i, captureItems);
+					} else {
+						this.#appendNomnomlImage(segment);
+					}
+				}
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
 				const thinkingText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;
 				if (this.hideThinkingBlock) {

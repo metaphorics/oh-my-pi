@@ -19,6 +19,12 @@ import darkThemeJson from "./dark.json" with { type: "json" };
 import { defaultThemes } from "./defaults";
 import lightThemeJson from "./light.json" with { type: "json" };
 import { resolveMermaidAscii } from "./mermaid-cache";
+import {
+	getMarkdownNomnomlRendering,
+	type MarkdownNomnomlRendering,
+	resolveNomnomlAscii,
+	setMarkdownNomnomlRendering as setNomnomlCacheRendering,
+} from "./nomnoml-cache";
 
 export { getLanguageFromPath } from "../../utils/lang-from-path";
 
@@ -2867,28 +2873,36 @@ export function setMarkdownMermaidRendering(enabled: boolean): void {
 	cachedMarkdownTheme = undefined;
 }
 
+export function setMarkdownNomnomlRendering(mode: MarkdownNomnomlRendering): void {
+	if (getMarkdownNomnomlRendering() === mode) return;
+	setNomnomlCacheRendering(mode);
+	cachedMarkdownTheme = undefined;
+}
+
 export function getMarkdownTheme(): MarkdownTheme {
 	if (cachedMarkdownTheme !== undefined && cachedMarkdownThemeRef === theme) {
 		return cachedMarkdownTheme;
 	}
-	const mermaid = markdownMermaidRendering
-		? (() => {
-				// Mermaid ASCII diagrams render with the active palette so they read as
-				// content rather than raw monochrome. Roles mirror the SVG renderer's
-				// mapping; `text`/`muted`/`border`/`borderMuted`/`accent` exist in every theme.
-				const mermaidColorMode =
-					theme.getColorMode() === "truecolor" ? ("truecolor" as const) : ("ansi256" as const);
-				const mermaidTheme = {
-					fg: theme.getColorHex("text"),
-					border: theme.getColorHex("border"),
-					line: theme.getColorHex("muted"),
-					arrow: theme.getColorHex("accent"),
-					corner: theme.getColorHex("muted"),
-					junction: theme.getColorHex("borderMuted"),
-				};
-				return { mermaidColorMode, mermaidTheme };
-			})()
-		: undefined;
+	const nomnomlRendering = getMarkdownNomnomlRendering();
+	const mermaid =
+		markdownMermaidRendering && nomnomlRendering === "off"
+			? (() => {
+					// Mermaid ASCII diagrams render with the active palette so they read as
+					// content rather than raw monochrome. Roles mirror the SVG renderer's
+					// mapping; `text`/`muted`/`border`/`borderMuted`/`accent` exist in every theme.
+					const mermaidColorMode =
+						theme.getColorMode() === "truecolor" ? ("truecolor" as const) : ("ansi256" as const);
+					const mermaidTheme = {
+						fg: theme.getColorHex("text"),
+						border: theme.getColorHex("border"),
+						line: theme.getColorHex("muted"),
+						arrow: theme.getColorHex("accent"),
+						corner: theme.getColorHex("muted"),
+						junction: theme.getColorHex("borderMuted"),
+					};
+					return { mermaidColorMode, mermaidTheme };
+				})()
+			: undefined;
 	const markdownTheme: MarkdownTheme = {
 		heading: (text: string) => theme.fg("mdHeading", text),
 		link: (text: string) => theme.fg("mdLink", text),
@@ -2913,6 +2927,8 @@ export function getMarkdownTheme(): MarkdownTheme {
 						colorMode: mermaid.mermaidColorMode,
 					})
 			: undefined,
+		resolveNomnomlAscii:
+			nomnomlRendering !== "off" ? (source, maxWidth) => resolveNomnomlAscii(source, maxWidth) : undefined,
 		highlightCode: (code: string, lang?: string): string[] => {
 			const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
 			const highlighted = highlightCached(code, validLang, theme);

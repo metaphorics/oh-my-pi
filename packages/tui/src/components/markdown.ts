@@ -674,6 +674,11 @@ export interface MarkdownTheme {
 	 * Return null to fall back to fenced code rendering.
 	 */
 	resolveMermaidAscii?: (source: string, maxWidth?: number) => string | null;
+	/**
+	 * Resolve a nomnoml ASCII rendering by fenced block source text.
+	 * Return null to fall back to fenced code rendering.
+	 */
+	resolveNomnomlAscii?: (source: string, maxWidth?: number) => string | null;
 	symbols: SymbolTheme;
 }
 
@@ -1548,6 +1553,21 @@ export class Markdown implements Component {
 				// resolver already re-fits over-wide horizontal graphs top-down.
 				if (token.lang === "mermaid" && this.#theme.resolveMermaidAscii) {
 					const ascii = this.#theme.resolveMermaidAscii(token.text, width);
+					if (ascii) {
+						for (const asciiLine of ascii.split("\n")) {
+							lines.push(
+								visibleWidth(asciiLine) > width ? truncateToWidth(asciiLine, width, Ellipsis.Omit) : asciiLine,
+							);
+						}
+						if (nextTokenType && nextTokenType !== "space") {
+							lines.push("");
+						}
+						break;
+					}
+				}
+
+				if (token.lang === "nomnoml" && this.#theme.resolveNomnomlAscii) {
+					const ascii = this.#theme.resolveNomnomlAscii(token.text, width);
 					if (ascii) {
 						for (const asciiLine of ascii.split("\n")) {
 							lines.push(

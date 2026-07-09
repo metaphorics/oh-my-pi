@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Nomnoml SVG and ASCII rendering helpers for terminal diagram output.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added

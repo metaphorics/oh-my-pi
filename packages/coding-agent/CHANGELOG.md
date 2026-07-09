@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Nomnoml diagram rendering with a `/settings` mode for SVG images, ASCII fallback, or highlighted fences; when active, Nomnoml replaces the Mermaid prompt/rendering hint.
 - `/guided-goal` now injects project context files (AGENTS.md and the like) as an untrusted `<repository-context>` system block so interview questions and drafted objectives ground in the real repo. Failures and empty projects keep the previous context-free behavior.
 
 ### Changed

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Markdown theme support for rendering `nomnoml` fenced code blocks as inline ASCII diagrams.
+
 ## [16.3.12] - 2026-07-08
 
 ### Fixed

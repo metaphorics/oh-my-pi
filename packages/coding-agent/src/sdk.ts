@@ -2422,6 +2422,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				model: settings.get("includeModelInPrompt") ? getActiveModelString() : undefined,
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				renderMermaid: settings.get("tui.renderMermaid"),
+				renderNomnoml: settings.get("tui.renderNomnoml") !== "off",
 				activeRepoContext,
 			});
 

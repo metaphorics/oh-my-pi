@@ -1335,6 +1335,8 @@ export declare function readImageFromClipboard(): Promise<ClipboardImage | undef
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
+export declare function renderSvgToPng(svg: string, zoom: number): Promise<Uint8Array>
+
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).
  * For repeated searches with the same pattern, use [`grep`] with file filters.
