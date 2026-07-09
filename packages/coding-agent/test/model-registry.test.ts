@@ -1707,6 +1707,49 @@ describe("ModelRegistry", () => {
 				}
 			}
 		});
+
+		test("refresh('offline') does not refresh expired OAuth credentials and does not hit the network", async () => {
+			const originalXaiOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
+			const originalXaiApiKey = Bun.env.XAI_API_KEY;
+			delete Bun.env.XAI_OAUTH_TOKEN;
+			delete Bun.env.XAI_API_KEY;
+
+			try {
+				await authStorage.set("xai-oauth", [
+					{
+						type: "oauth",
+						access: "expired-access-token",
+						refresh: "expired-refresh-token",
+						expires: Date.now() - 60_000,
+					},
+				]);
+
+				const fetchMock: FetchImpl = async input => {
+					throw new Error(`Unexpected network call in offline mode: ${String(input)}`);
+				};
+
+				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+				const spy = spyOn(registry, "getApiKeyForProvider");
+
+				try {
+					await registry.refresh("offline");
+					expect(spy).not.toHaveBeenCalled();
+				} finally {
+					spy.mockRestore();
+				}
+			} finally {
+				if (originalXaiOAuthToken === undefined) {
+					delete Bun.env.XAI_OAUTH_TOKEN;
+				} else {
+					Bun.env.XAI_OAUTH_TOKEN = originalXaiOAuthToken;
+				}
+				if (originalXaiApiKey === undefined) {
+					delete Bun.env.XAI_API_KEY;
+				} else {
+					Bun.env.XAI_API_KEY = originalXaiApiKey;
+				}
+			}
+		});
 	});
 
 	describe("disabled provider filtering", () => {

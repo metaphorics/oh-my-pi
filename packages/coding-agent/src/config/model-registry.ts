@@ -1561,7 +1561,7 @@ export class ModelRegistry {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
 		const managerOptions = (
-			await this.#collectBuiltInModelManagerOptions(configuredDiscoveryProviders, providerFilter)
+			await this.#collectBuiltInModelManagerOptions(strategy, configuredDiscoveryProviders, providerFilter)
 		).filter(opts => {
 			if (configuredDiscoveryProviders.has(opts.providerId)) {
 				return false;
@@ -1586,6 +1586,7 @@ export class ModelRegistry {
 	}
 
 	async #collectBuiltInModelManagerOptions(
+		strategy: ModelRefreshStrategy,
 		configuredDiscoveryProviders?: ReadonlySet<string>,
 		providerFilter?: ReadonlySet<string>,
 	): Promise<ModelManagerOptions<Api>[]> {
@@ -1659,7 +1660,7 @@ export class ModelRegistry {
 		// are preserved — getApiKey returns the bare token, peek re-wraps it.
 		const peekKey = async (descriptor: { providerId: string }): Promise<string | undefined> => {
 			const peeked = await this.#peekApiKeyForProvider(descriptor.providerId);
-			if (isAuthenticated(peeked) || !this.authStorage.hasOAuth(descriptor.providerId)) {
+			if (strategy === "offline" || isAuthenticated(peeked) || !this.authStorage.hasOAuth(descriptor.providerId)) {
 				return peeked;
 			}
 			let refreshed: string | undefined;
