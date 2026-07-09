@@ -74589,7 +74589,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 1048576,
 			"compat": {
 				"supportsUsageInStreaming": false
