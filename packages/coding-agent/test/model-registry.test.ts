@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1478,6 +1478,27 @@ describe("ModelRegistry", () => {
 			await registry.refreshProvider("github-copilot", "online");
 			expect(requestedUrls).toContain("https://copilot-api.ghe.example.com/models");
 			expect(requestedUrls).not.toContain("https://api.githubcopilot.com/models");
+		});
+	});
+
+	describe("built-in OAuth discovery refresh handling", () => {
+		test("contains a rejecting OAuth refresh and skips the provider", async () => {
+			await authStorage.set("xai-oauth", [
+				{
+					type: "oauth",
+					access: "stale-access",
+					refresh: "r",
+					expires: Date.now() - 60_000,
+				},
+			]);
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const refreshSpy = spyOn(registry, "getApiKeyForProvider").mockRejectedValue(
+				new Error("refresh refused"),
+			);
+
+			await expect(registry.refreshProvider("xai-oauth", "online")).resolves.toBeUndefined();
+			expect(refreshSpy).toHaveBeenCalledWith("xai-oauth");
 		});
 	});
 

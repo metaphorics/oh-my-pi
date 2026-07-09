@@ -1639,7 +1639,12 @@ export class ModelRegistry {
 			if (isAuthenticated(peeked) || !this.authStorage.hasOAuth(descriptor.providerId)) {
 				return peeked;
 			}
-			const refreshed = await this.getApiKeyForProvider(descriptor.providerId);
+			let refreshed: string | undefined;
+			try {
+				refreshed = await this.getApiKeyForProvider(descriptor.providerId);
+			} catch {
+				return peeked;
+			}
 			if (!isAuthenticated(refreshed)) {
 				return peeked;
 			}
