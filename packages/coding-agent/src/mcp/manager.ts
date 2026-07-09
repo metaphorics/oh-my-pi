@@ -426,7 +426,26 @@ export class MCPManager {
 		if (this.#connections.has(name)) return;
 		const pending = this.#pendingOnDemandConnections.get(name);
 		if (pending) return pending;
-
+		const pendingConnection = this.#pendingConnections.get(name);
+		if (pendingConnection) {
+			const pendingReady = this.#pendingToolLoads.get(name) ?? pendingConnection;
+			const attempt = pendingReady
+				.then(
+					() => {
+						this.#serverErrors.delete(name);
+					},
+					error => {
+						const message = error instanceof Error ? error.message : String(error);
+						this.#serverErrors.set(name, message);
+						throw error;
+					},
+				)
+				.finally(() => {
+					this.#pendingOnDemandConnections.delete(name);
+				});
+			this.#pendingOnDemandConnections.set(name, attempt);
+			return attempt;
+		}
 		const config = this.#serverConfigs.get(name);
 		if (!config) throw new Error(`MCP server not configured: ${name}`);
 		const validationErrors = validateServerConfig(name, config);
@@ -872,6 +891,11 @@ export class MCPManager {
 		if (reconnecting) {
 			const result = await reconnecting;
 			if (result) return result;
+		}
+		if (this.#serverConfigs.has(name)) {
+			await this.connectServerOnDemand(name);
+			const connected = this.#connections.get(name);
+			if (connected) return connected;
 		}
 		throw new Error(`MCP server not connected: ${name}`);
 	}

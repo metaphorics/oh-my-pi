@@ -366,6 +366,37 @@ function collectPendingMCPToolNames(
 	return [...names];
 }
 
+function collectMCPServerNames(toolNames: readonly string[]): string[] {
+	const serverNames = new Set<string>();
+	for (const name of toolNames) {
+		const parsed = parseMCPToolName(name);
+		if (parsed?.serverName) serverNames.add(parsed.serverName);
+	}
+	return [...serverNames];
+}
+
+function startLazyMCPConnectionsForToolNames(
+	mcpManager: MCPManager,
+	session: AgentSession,
+	toolNames: readonly string[],
+): void {
+	for (const serverName of collectMCPServerNames(toolNames)) {
+		if (mcpManager.getConnection(serverName) || !mcpManager.getServerConfig(serverName)) continue;
+		void mcpManager
+			.connectServerOnDemand(serverName)
+			.then(async () => {
+				if (session.isDisposed) return;
+				await session.refreshMCPTools(mcpManager.getTools());
+			})
+			.catch(error => {
+				logger.warn("Lazy MCP connection failed", {
+					path: `mcp:${serverName}`,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+	}
+}
+
 function logMCPLoadErrors(errors: MCPLoadResult["errors"]): void {
 	for (const [serverName, error] of errors) {
 		logger.error("MCP tool load failed", { path: `mcp:${serverName}`, error });
@@ -3152,6 +3183,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}, debounceMs),
 				);
 			});
+		}
+		if (mcpManager && lazyMCPDiscovery) {
+			const requestedOrRestoredMCPToolNames = collectPendingMCPToolNames(
+				options.toolNames,
+				existingSession.selectedMCPToolNames,
+			);
+			if (requestedOrRestoredMCPToolNames.length > 0) {
+				startLazyMCPConnectionsForToolNames(mcpManager, session, requestedOrRestoredMCPToolNames);
+			}
 		}
 
 		startDeferredMCPDiscovery?.(session, {

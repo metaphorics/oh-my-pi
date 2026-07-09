@@ -8,7 +8,7 @@
  * 4. A failing on-demand connect surfaces `server "<name>" unavailable: …`.
  * 5. Eager `discoverAndConnect` still connects at discovery time.
  */
-import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -152,9 +152,9 @@ describe("lazy MCP discovery (T6)", () => {
 	let isolatedHome: string;
 	let originalAgentDir: string;
 	let storage: AgentStorage;
-	let connectSpy: ReturnType<typeof spyOn>;
-	let listToolsSpy: ReturnType<typeof spyOn>;
-	let homedirSpy: ReturnType<typeof spyOn>;
+	let connectSpy: Mock<typeof mcpClient.connectToServer>;
+	let listToolsSpy: Mock<typeof mcpClient.listTools>;
+	let homedirSpy: Mock<typeof os.homedir>;
 
 	beforeEach(async () => {
 		workDir = path.join(os.tmpdir(), `omp-mcp-lazy-${Snowflake.next()}`);
@@ -389,6 +389,62 @@ describe("lazy MCP discovery (T6)", () => {
 				.join("\n");
 			const payload = JSON.parse(contentText) as { unavailable_servers?: string[] };
 			expect(payload.unavailable_servers).toEqual([unavailable]);
+			expect(result.details?.activated_tools).toEqual([]);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("connectServerOnDemand reuses an existing pending connection", async () => {
+		const { cached } = writeProjectMcpConfig(workDir);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		const connectionReady = Promise.withResolvers<MCPServerConnection>();
+		try {
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) => {
+				expect(name).toBe(CACHED_SERVER);
+				return connectionReady.promise.then(() => mockConnectionFor(name, config));
+			});
+			listToolsSpy.mockResolvedValue([LIVE_TOOL_DEF]);
+
+			const startupConnect = manager.connectServers({ [CACHED_SERVER]: cached }, {}, undefined);
+			await Promise.resolve();
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+
+			const onDemandConnect = manager.connectServerOnDemand(CACHED_SERVER);
+			await Promise.resolve();
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+
+			connectionReady.resolve(mockConnectionFor(CACHED_SERVER, cached));
+			await onDemandConnect;
+			await startupConnect;
+
+			expect(listToolsSpy).toHaveBeenCalledTimes(1);
+			expect(manager.getConnection(CACHED_SERVER)).toBeDefined();
+			expect(manager.getTools().map(tool => tool.name)).toContain(`mcp__${CACHED_SERVER}_lookup_docs`);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("waitForConnection starts on-demand connect for deferred cached tools", async () => {
+		const { cached } = writeProjectMcpConfig(workDir);
+		const toolCache = new MCPToolCache(storage);
+		await toolCache.set(CACHED_SERVER, cached, [CACHED_TOOL_DEF]);
+
+		const manager = new MCPManager(workDir, toolCache);
+		try {
+			await manager.discoverDeferred();
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+				mockConnectionFor(name, config),
+			);
+			listToolsSpy.mockResolvedValue([LIVE_TOOL_DEF]);
+
+			const connection = await manager.waitForConnection(CACHED_SERVER);
+
+			expect(connection.name).toBe(CACHED_SERVER);
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(listToolsSpy).toHaveBeenCalledTimes(1);
+			expect(manager.getTools().map(tool => tool.name)).toContain(`mcp__${CACHED_SERVER}_lookup_docs`);
 		} finally {
 			await manager.disconnectAll();
 		}

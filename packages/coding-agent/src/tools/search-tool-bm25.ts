@@ -157,8 +157,8 @@ function getLazyMCPServerName(session: ToolSession, tool: DiscoverableTool): str
 async function connectLazyMCPMatches(
 	session: ToolSession,
 	ranked: Array<{ tool: DiscoverableTool; score: number }>,
-): Promise<{ attempted: boolean; unavailable: string[] }> {
-	if (!session.mcpManager) return { attempted: false, unavailable: [] };
+): Promise<{ attempted: boolean; unavailable: string[]; unavailableServerNames: Set<string> }> {
+	if (!session.mcpManager) return { attempted: false, unavailable: [], unavailableServerNames: new Set() };
 	const serverNames = [
 		...new Set(
 			ranked
@@ -167,6 +167,7 @@ async function connectLazyMCPMatches(
 		),
 	];
 	const unavailable: string[] = [];
+	const unavailableServerNames = new Set<string>();
 	let connected = false;
 	for (const serverName of serverNames) {
 		try {
@@ -175,12 +176,13 @@ async function connectLazyMCPMatches(
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			unavailable.push(`server "${serverName}" unavailable: ${message}`);
+			unavailableServerNames.add(serverName);
 		}
 	}
 	if (connected) {
 		await session.refreshMCPTools?.(session.mcpManager.getTools());
 	}
-	return { attempted: serverNames.length > 0, unavailable };
+	return { attempted: serverNames.length > 0, unavailable, unavailableServerNames };
 }
 
 export function renderSearchToolBm25Description(
@@ -310,6 +312,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 
 		const lazyConnections = await connectLazyMCPMatches(this.session, ranked);
 		const unavailableServers = lazyConnections.unavailable;
+		const unavailableServerNames = lazyConnections.unavailableServerNames;
 		if (lazyConnections.attempted) {
 			searchIndex = buildDiscoverableToolSearchIndex(getDiscoverableToolsForDescription(this.session));
 			selectedToolNames = new Set(getSelectedToolNames(this.session));
@@ -321,7 +324,17 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			ranked.length > 0
 				? await activateTools(
 						this.session,
-						ranked.filter(result => !result.tool.deferredServer).map(result => result.tool.name),
+						ranked
+							.filter(
+								result =>
+									!result.tool.deferredServer &&
+									!(
+										result.tool.source === "mcp" &&
+										typeof result.tool.serverName === "string" &&
+										unavailableServerNames.has(result.tool.serverName)
+									),
+							)
+							.map(result => result.tool.name),
 					)
 				: [];
 
