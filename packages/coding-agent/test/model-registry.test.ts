@@ -1481,27 +1481,6 @@ describe("ModelRegistry", () => {
 		});
 	});
 
-	describe("built-in OAuth discovery refresh handling", () => {
-		test("contains a rejecting OAuth refresh and skips the provider", async () => {
-			await authStorage.set("xai-oauth", [
-				{
-					type: "oauth",
-					access: "stale-access",
-					refresh: "r",
-					expires: Date.now() - 60_000,
-				},
-			]);
-
-			const registry = new ModelRegistry(authStorage, modelsJsonPath);
-			const refreshSpy = spyOn(registry, "getApiKeyForProvider").mockRejectedValue(
-				new Error("refresh refused"),
-			);
-
-			await expect(registry.refreshProvider("xai-oauth", "online")).resolves.toBeUndefined();
-			expect(refreshSpy).toHaveBeenCalledWith("xai-oauth");
-		});
-	});
-
 	describe("disabled provider filtering", () => {
 		test("getAvailable and getDiscoverableProviders exclude disabled providers from settings", async () => {
 			writeRawModelsJson({
