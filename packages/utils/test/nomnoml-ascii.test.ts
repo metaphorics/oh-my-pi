@@ -24,4 +24,10 @@ describe("renderNomnomlAsciiSafe", () => {
 
 		expect(renderNomnomlAsciiSafe(source, 8)).toBeNull();
 	});
+
+	it("returns null instead of clipping layouts past the canvas dimension limit", () => {
+		const source = `[${"A".repeat(450)}]`;
+
+		expect(renderNomnomlAsciiSafe(source, 1000)).toBeNull();
+	});
 });

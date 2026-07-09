@@ -72,28 +72,83 @@ function containsMermaidFence(text: string): boolean {
 	return false;
 }
 
-const NOMNOML_BLOCK = /```nomnoml[^\n]*\n([\s\S]*?)```/g;
+type TopLevelNomnomlBlock = {
+	source: string;
+	start: number;
+	end: number;
+	rasterKey: string;
+	imageKey: string;
+};
 
 type TextNomnomlSegment =
 	| { type: "markdown"; text: string }
 	| { type: "image"; key: string; data: string; mimeType: "image/png" };
 
-function nomnomlImageKey(source: string): string {
+function nomnomlRasterKey(source: string): string {
 	return `nomnoml:${Bun.hash(source)}`;
+}
+
+function nomnomlImageKey(rasterKey: string, occurrence: number, start: number): string {
+	return `${rasterKey}:${occurrence}:${start}`;
+}
+
+function findTopLevelNomnomlBlocks(text: string): TopLevelNomnomlBlock[] {
+	const blocks: TopLevelNomnomlBlock[] = [];
+	let fence: { marker: string; start: number; contentStart: number; nomnoml: boolean } | undefined;
+	let offset = 0;
+	for (const rawLine of text.split(/(?<=\n)/)) {
+		if (rawLine.length === 0) continue;
+		const lineStart = offset;
+		const line = rawLine.endsWith("\n") ? rawLine.slice(0, -1) : rawLine;
+		offset += rawLine.length;
+		const fenceMatch = CODE_FENCE_LINE.exec(line);
+		if (fence) {
+			if (fenceMatch) {
+				const marker = fenceMatch[1] ?? "";
+				const info = fenceMatch[2] ?? "";
+				if (info.trim() === "" && marker[0] === fence.marker[0] && marker.length >= fence.marker.length) {
+					if (fence.nomnoml) {
+						const source = text.slice(fence.contentStart, lineStart).trim();
+						if (source) {
+							const rasterKey = nomnomlRasterKey(source);
+							blocks.push({
+								source,
+								start: fence.start,
+								end: offset,
+								rasterKey,
+								imageKey: nomnomlImageKey(rasterKey, blocks.length, fence.start),
+							});
+						}
+					}
+					fence = undefined;
+				}
+			}
+			continue;
+		}
+		if (fenceMatch) {
+			const marker = fenceMatch[1] ?? "";
+			const info = fenceMatch[2] ?? "";
+			fence = {
+				marker,
+				start: lineStart,
+				contentStart: offset,
+				nomnoml: /^nomnoml\b/.test(info.trim()),
+			};
+		}
+	}
+	return blocks;
 }
 
 function splitNomnomlImages(text: string, pngByKey: ReadonlyMap<string, string>): TextNomnomlSegment[] {
 	const segments: TextNomnomlSegment[] = [];
 	let lastIndex = 0;
-	for (let match = NOMNOML_BLOCK.exec(text); match !== null; match = NOMNOML_BLOCK.exec(text)) {
-		const source = match[1]?.trim() ?? "";
-		const key = nomnomlImageKey(source);
-		const data = pngByKey.get(key);
+	for (const block of findTopLevelNomnomlBlocks(text)) {
+		const data = pngByKey.get(block.rasterKey);
 		if (!data) continue;
-		const before = text.slice(lastIndex, match.index).trim();
+		const before = text.slice(lastIndex, block.start).trim();
 		if (before) segments.push({ type: "markdown", text: before });
-		segments.push({ type: "image", key, data, mimeType: "image/png" });
-		lastIndex = NOMNOML_BLOCK.lastIndex;
+		segments.push({ type: "image", key: block.imageKey, data, mimeType: "image/png" });
+		lastIndex = block.end;
 	}
 	const after = text.slice(lastIndex).trim();
 	if (after) segments.push({ type: "markdown", text: after });
@@ -731,34 +786,26 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#queueNomnomlPngs(message: AssistantMessage): void {
-		if (
-			this.#lastUpdateTransient ||
-			TERMINAL.imageProtocol === undefined ||
-			getMarkdownNomnomlRendering() !== "svg"
-		) {
+		if (this.#lastUpdateTransient || !TERMINAL.imageProtocol || getMarkdownNomnomlRendering() !== "svg") {
 			return;
 		}
 		for (const content of message.content) {
 			if (content.type !== "text") continue;
-			NOMNOML_BLOCK.lastIndex = 0;
-			for (let match = NOMNOML_BLOCK.exec(content.text); match !== null; match = NOMNOML_BLOCK.exec(content.text)) {
-				const source = match[1]?.trim() ?? "";
-				if (!source) continue;
-				const key = nomnomlImageKey(source);
-				if (this.#nomnomlPngByKey.has(key) || this.#nomnomlPngInFlight.has(key)) continue;
-				this.#nomnomlPngInFlight.add(key);
-				resolveNomnomlPng(source)
+			for (const block of findTopLevelNomnomlBlocks(content.text)) {
+				if (this.#nomnomlPngByKey.has(block.rasterKey) || this.#nomnomlPngInFlight.has(block.rasterKey)) continue;
+				this.#nomnomlPngInFlight.add(block.rasterKey);
+				resolveNomnomlPng(block.source)
 					.then(data => {
-						this.#nomnomlPngInFlight.delete(key);
+						this.#nomnomlPngInFlight.delete(block.rasterKey);
 						if (!data) return;
-						this.#nomnomlPngByKey.set(key, data);
+						this.#nomnomlPngByKey.set(block.rasterKey, data);
 						if (this.#lastMessage) {
 							this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 						}
 						this.onImageUpdate?.();
 					})
 					.catch(() => {
-						this.#nomnomlPngInFlight.delete(key);
+						this.#nomnomlPngInFlight.delete(block.rasterKey);
 					});
 			}
 		}
@@ -867,7 +914,7 @@ export class AssistantMessageComponent extends Container {
 		// Render content in order
 		let thinkingIndex = 0;
 		const renderNomnomlImages =
-			!this.#lastUpdateTransient && TERMINAL.imageProtocol !== undefined && getMarkdownNomnomlRendering() === "svg";
+			!this.#lastUpdateTransient && !!TERMINAL.imageProtocol && getMarkdownNomnomlRendering() === "svg";
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {

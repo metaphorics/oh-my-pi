@@ -282,9 +282,9 @@ function asciiDisplayWidth(ascii: string): number {
 }
 
 function renderLayout(root: LayoutPart): string | null {
-	const width = Math.min(MAX_DIMENSION, Math.max(1, Math.ceil(root.width ?? 0) + 2));
-	const height = Math.min(MAX_DIMENSION, Math.max(1, Math.ceil(root.height ?? 0) + 2));
-	if (width * height > MAX_CANVAS_CELLS) return null;
+	const width = Math.max(1, Math.ceil(root.width ?? 0) + 2);
+	const height = Math.max(1, Math.ceil(root.height ?? 0) + 2);
+	if (width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_CANVAS_CELLS) return null;
 	const grid = new CharGrid(width, height);
 	for (const assoc of root.assocs ?? []) drawAssociationLines(grid, assoc);
 	for (const node of root.nodes ?? []) drawNode(grid, node);
@@ -303,8 +303,7 @@ export function renderNomnomlAsciiSafe(source: string, maxWidth = 120): string |
 		const normalizedSource = source.replace(/\r\n?/g, "\n").trim();
 		if (!normalizedSource) return null;
 		const base = renderVariant(normalizedSource);
-		if (base === null) return null;
-		let best: string | null = asciiDisplayWidth(base) <= maxWidth ? base : null;
+		let best: string | null = base !== null && asciiDisplayWidth(base) <= maxWidth ? base : null;
 		let bestWidth = best === null ? Number.POSITIVE_INFINITY : asciiDisplayWidth(best);
 		for (const direction of ["TB", "LR"] as const) {
 			const variant = renderVariant(normalizedSource, direction);
