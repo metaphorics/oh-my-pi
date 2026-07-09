@@ -8311,6 +8311,8 @@ export class AgentSession {
 	/**
 	 * Send a user message to the agent.
 	 * When deliverAs is set, queue the message instead of starting a new turn.
+	 * When the agent is already streaming and no deliverAs is given, the message
+	 * is queued as a steer instead of rejecting with AgentBusyError.
 	 *
 	 * @param content User message content (string or content array)
 	 * @param options.deliverAs Delivery mode: "steer" or "followUp"
@@ -8344,6 +8346,14 @@ export class AgentSession {
 			return;
 		}
 		if (options?.deliverAs === "steer") {
+			await this.#queueUserMessage(text, images, "steer");
+			return;
+		}
+
+		// Extension callers often omit deliverAs. When the agent is already busy,
+		// queue as a steer instead of throwing AgentBusyError ("Agent is already
+		// processing…") which surfaces as an extension toast.
+		if (this.isStreaming) {
 			await this.#queueUserMessage(text, images, "steer");
 			return;
 		}

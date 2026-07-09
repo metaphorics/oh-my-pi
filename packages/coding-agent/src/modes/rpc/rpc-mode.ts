@@ -95,13 +95,16 @@ export async function tryRunRpcSkillCommand(
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return false;
 	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
-	await session.promptCustomMessage({
-		customType: SKILL_PROMPT_MESSAGE_TYPE,
-		content: built.message,
-		display: true,
-		details: built.details,
-		attribution: "user",
-	});
+	await session.promptCustomMessage(
+		{
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: built.message,
+			display: true,
+			details: built.details,
+			attribution: "user",
+		},
+		{ streamingBehavior: "steer" },
+	);
 	return { agentInvoked: true };
 }
 

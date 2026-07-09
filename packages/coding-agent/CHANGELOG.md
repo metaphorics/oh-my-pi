@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed extension `sendUserMessage` throwing `Agent is already processing…` while the agent is streaming: without `deliverAs`, busy messages now queue as a steer. ACP/RPC skill invocations pass `streamingBehavior: "steer"` so they can land mid-turn the same way TUI skill commands do.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added

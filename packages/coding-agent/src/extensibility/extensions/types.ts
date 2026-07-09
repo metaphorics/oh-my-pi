@@ -1107,7 +1107,10 @@ export interface ExtensionAPI {
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): void;
 
-	/** Send a user message to the agent, or queue it when deliverAs is set. */
+	/**
+	 * Send a user message to the agent, or queue it when deliverAs is set.
+	 * When the agent is busy and deliverAs is omitted, the message is queued as a steer.
+	 */
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },

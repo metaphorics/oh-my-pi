@@ -176,6 +176,36 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {});
 	});
 
+	it("queues sendUserMessage as steer while streaming without AgentBusyError", async () => {
+		await createSession();
+
+		const firstPrompt = session.prompt("First message");
+		await waitFor(() => session.isStreaming);
+
+		// The first agent loop may dequeue a steer before the assertion runs, so
+		// observe agent.steer itself rather than the residual queue length.
+		const steered: AgentMessage[] = [];
+		const originalSteer = session.agent.steer.bind(session.agent);
+		session.agent.steer = (message: AgentMessage) => {
+			steered.push(message);
+			originalSteer(message);
+		};
+
+		// Extension path: no deliverAs while busy must queue, not throw.
+		await expect(session.sendUserMessage("hello from extension")).resolves.toBeUndefined();
+		expect(steered).toHaveLength(1);
+		const queued = steered[0];
+		expect(queued?.role).toBe("user");
+		if (queued?.role === "user") {
+			expect(queued.content).toEqual([{ type: "text", text: "hello from extension" }]);
+			expect(queued.steering).toBe(true);
+		}
+
+		session.agent.clearAllQueues();
+		await session.abort();
+		await firstPrompt.catch(() => {});
+	});
+
 	it("delivers hidden nextTurn stop reactions through the next LLM call without exposing them in the visible queue", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		let firstStream: AssistantMessageEventStream | undefined;
