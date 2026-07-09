@@ -12,6 +12,7 @@ import type { SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
+import type { DiscoverableTool, DiscoverableToolServerSummary } from "../tool-discovery/tool-index";
 import {
 	connectToServer,
 	disconnectServer,
@@ -35,7 +36,7 @@ import {
 import { type MCPStoredOAuthCredential, refreshMCPOAuthToken } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import type { MCPToolDetails } from "./tool-bridge";
-import { DeferredMCPTool, MCPTool } from "./tool-bridge";
+import { createMCPServerToolName, DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import type {
 	MCPGetPromptResult,
@@ -156,6 +157,8 @@ export interface MCPDiscoverOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/** Server names that must connect eagerly even in lazy discovery mode. */
+	discoveryDefaultServers?: readonly string[];
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
 }
@@ -198,6 +201,9 @@ export class MCPManager {
 	#subscribedResources = new Map<string, Set<string>>();
 	#pendingResourceRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void> }>();
 	#pendingReconnections = new Map<string, Promise<MCPServerConnection | null>>();
+	#pendingOnDemandConnections = new Map<string, Promise<void>>();
+	#deferredServerToolCounts = new Map<string, number | null>();
+	#serverErrors = new Map<string, string>();
 	/** Preserved configs for reconnection after connection loss. */
 	#serverConfigs = new Map<string, MCPServerConfig>();
 	/**
@@ -333,6 +339,167 @@ export class MCPManager {
 		const result = await this.connectServers(configs, sources, options?.onStatus);
 		result.exaApiKeys = exaApiKeys;
 		return result;
+	}
+
+	/**
+	 * Discover configured MCP servers without connecting to them, except servers
+	 * explicitly listed as discovery defaults. Cached schemas are exposed as
+	 * deferred tools whose first call connects the server on demand; cache misses
+	 * are represented by server-level discoverable pseudo-entries.
+	 */
+	async discoverDeferred(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
+		let loadedConfigs: LoadMCPConfigsResult;
+		try {
+			loadedConfigs = await loadAllMCPConfigs(this.cwd, {
+				enableProjectConfig: options?.enableProjectConfig,
+				filterExa: options?.filterExa,
+				filterBrowser: options?.filterBrowser,
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			options?.onStatus?.({ type: "failed", serverName: ".mcp.json", error: message });
+			throw error;
+		}
+
+		const { configs, exaApiKeys, sources } = loadedConfigs;
+		const eagerServers = new Set((options?.discoveryDefaultServers ?? []).map(name => name.trim()).filter(Boolean));
+		const eagerConfigs: Record<string, MCPServerConfig> = {};
+		const eagerSources: Record<string, SourceMeta> = {};
+		const deferredTools: CustomTool<TSchema, MCPToolDetails>[] = [];
+		const errors = new Map<string, string>();
+
+		this.#deferredServerToolCounts.clear();
+		this.#serverErrors.clear();
+
+		for (const [name, config] of Object.entries(configs)) {
+			if (sources[name]) this.#sources.set(name, sources[name]);
+			this.#serverConfigs.set(name, config);
+			if (eagerServers.has(name)) {
+				eagerConfigs[name] = config;
+				if (sources[name]) eagerSources[name] = sources[name];
+				continue;
+			}
+
+			const validationErrors = validateServerConfig(name, config);
+			if (validationErrors.length > 0) {
+				const message = validationErrors.join("; ");
+				errors.set(name, message);
+				this.#serverErrors.set(name, message);
+				this.#deferredServerToolCounts.set(name, null);
+				continue;
+			}
+
+			const cached = await this.toolCache?.get(name, config);
+			if (cached && cached.length > 0) {
+				this.#deferredServerToolCounts.set(name, cached.length);
+				const source = this.#sources.get(name);
+				const reconnect = () => this.reconnectServer(name);
+				const getConnection = async () => {
+					await this.connectServerOnDemand(name);
+					return this.waitForConnection(name);
+				};
+				deferredTools.push(...DeferredMCPTool.fromTools(name, cached, getConnection, source, reconnect));
+			} else {
+				this.#deferredServerToolCounts.set(name, null);
+			}
+		}
+
+		let eagerResult: MCPLoadResult | undefined;
+		if (Object.keys(eagerConfigs).length > 0) {
+			eagerResult = await this.connectServers(eagerConfigs, eagerSources, options?.onStatus);
+			for (const [name, message] of eagerResult.errors) errors.set(name, message);
+		}
+
+		const tools = [...(eagerResult?.tools ?? []), ...deferredTools];
+		sortMCPToolsByName(tools);
+		this.#tools = tools;
+
+		return {
+			tools,
+			errors,
+			connectedServers: eagerResult?.connectedServers ?? [],
+			exaApiKeys,
+		};
+	}
+
+	async connectServerOnDemand(name: string): Promise<void> {
+		if (this.#connections.has(name)) return;
+		const pending = this.#pendingOnDemandConnections.get(name);
+		if (pending) return pending;
+
+		const config = this.#serverConfigs.get(name);
+		if (!config) throw new Error(`MCP server not configured: ${name}`);
+		const validationErrors = validateServerConfig(name, config);
+		if (validationErrors.length > 0) {
+			const message = validationErrors.join("; ");
+			this.#serverErrors.set(name, message);
+			throw new Error(message);
+		}
+
+		const source = this.#sources.get(name);
+		const connectEpoch = this.#epoch;
+		const connectionPromise = this.#connectAndWireServer(name, config, source, connectEpoch);
+		this.#pendingConnections.set(name, connectionPromise);
+		const attempt = connectionPromise
+			.then(
+				() => {
+					this.#serverErrors.delete(name);
+				},
+				error => {
+					const message = error instanceof Error ? error.message : String(error);
+					this.#serverErrors.set(name, message);
+					throw error;
+				},
+			)
+			.finally(() => {
+				if (this.#pendingConnections.get(name) === connectionPromise) this.#pendingConnections.delete(name);
+				this.#pendingOnDemandConnections.delete(name);
+			});
+		this.#pendingOnDemandConnections.set(name, attempt);
+		return attempt;
+	}
+
+	getDeferredDiscoverableTools(): DiscoverableTool[] {
+		const tools: DiscoverableTool[] = [];
+		for (const [name, cachedCount] of this.#deferredServerToolCounts) {
+			if (cachedCount !== null || this.#connections.has(name) || this.#pendingConnections.has(name)) continue;
+			const config = this.#serverConfigs.get(name);
+			const description = config?.description?.slice(0, 200);
+			tools.push({
+				name: createMCPServerToolName(name),
+				label: name,
+				summary: description ?? `MCP server "${name}" — tools not yet loaded; searching or calling loads them`,
+				source: "mcp",
+				serverName: name,
+				deferredServer: true,
+				schemaKeys: [],
+			});
+		}
+		return tools;
+	}
+
+	getDiscoverableServerSummaries(): DiscoverableToolServerSummary[] {
+		const summaries: DiscoverableToolServerSummary[] = [];
+		for (const [name, config] of this.#serverConfigs) {
+			const liveToolCount = this.#tools.filter(tool => tool.mcpServerName === name).length;
+			const cachedCount = this.#deferredServerToolCounts.get(name);
+			summaries.push({
+				name,
+				toolCount: liveToolCount || cachedCount || 0,
+				cached: !this.#connections.has(name) && cachedCount !== undefined && cachedCount !== null,
+				deferred: !this.#connections.has(name) && (cachedCount === undefined || cachedCount === null),
+				description: config.description?.slice(0, 200),
+			});
+		}
+		return summaries.sort((left, right) => left.name.localeCompare(right.name));
+	}
+
+	getServerError(name: string): string | undefined {
+		return this.#serverErrors.get(name);
+	}
+
+	isServerDeferred(name: string): boolean {
+		return this.#serverConfigs.has(name) && !this.#connections.has(name) && !this.#pendingConnections.has(name);
 	}
 
 	/**
@@ -741,6 +908,9 @@ export class MCPManager {
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#pendingReconnections.delete(name);
+		this.#pendingOnDemandConnections.delete(name);
+		this.#deferredServerToolCounts.delete(name);
+		this.#serverErrors.delete(name);
 		this.#sources.delete(name);
 		this.#serverConfigs.delete(name);
 		this.#pendingResourceRefresh.delete(name);
@@ -787,9 +957,12 @@ export class MCPManager {
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
 		this.#pendingReconnections.clear();
+		this.#pendingOnDemandConnections.clear();
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
 		this.#serverConfigs.clear();
+		this.#deferredServerToolCounts.clear();
+		this.#serverErrors.clear();
 		this.#connections.clear();
 		this.#tools = [];
 		this.#subscribedResources.clear();

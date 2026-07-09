@@ -3864,6 +3864,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"mcp.lazyDiscovery": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "Lazy MCP Discovery",
+			description:
+				"Defer MCP server connections until their tools are first needed; the prompt lists servers from config and cached schemas",
+		},
+	},
+
 	"mcp.discoveryDefaultServers": {
 		type: "array",
 		default: [] as string[],

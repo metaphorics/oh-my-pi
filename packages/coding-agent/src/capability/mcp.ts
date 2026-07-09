@@ -15,6 +15,8 @@ export interface MCPServer {
 	name: string;
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
+	/** Human-readable server description for lazy discovery summaries */
+	description?: string;
 	/** Connection timeout in milliseconds */
 	timeout?: number;
 	/** Command to run (for stdio transport) */
@@ -61,6 +63,8 @@ export const mcpCapability = defineCapability<MCPServer>({
 	toExtensionId: server => `mcp:${server.name}`,
 	validate: server => {
 		if (!server.name) return "Missing server name";
+		if (server.description !== undefined && typeof server.description !== "string")
+			return "description must be a string";
 		if (!server.command && !server.url) return "Must have command or url";
 
 		// Validate transport-endpoint pairing

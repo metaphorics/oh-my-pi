@@ -747,6 +747,8 @@ export interface AgentSessionConfig {
 	 * signature comparison and silently keep a stale prompt cached.
 	 */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** Lazy MCP server pseudo-entries for configured servers whose tools are not loaded yet. */
+	getDeferredDiscoverableMCPTools?: () => DiscoverableTool[];
 	/** Enable hidden-by-default MCP tool discovery for this session. */
 	mcpDiscoveryEnabled?: boolean;
 	/** MCP tool names to activate for the current session when discovery mode is enabled. */
@@ -1733,6 +1735,7 @@ export class AgentSession {
 		| undefined;
 	#getLocalCalendarDate: () => string;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
+	#getDeferredDiscoverableMCPTools: (() => DiscoverableTool[]) | undefined;
 	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
 	#setActiveToolNames: ((names: Iterable<string>) => void) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
@@ -2180,6 +2183,7 @@ export class AgentSession {
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#getLocalCalendarDate = config.getLocalCalendarDate ?? formatLocalCalendarDate;
 		this.#getMcpServerInstructions = config.getMcpServerInstructions;
+		this.#getDeferredDiscoverableMCPTools = config.getDeferredDiscoverableMCPTools;
 		this.#reloadSshTool = config.reloadSshTool;
 		this.#setActiveToolNames = config.setActiveToolNames;
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
@@ -5935,7 +5939,8 @@ export class AgentSession {
 
 	#collectDiscoverableMCPToolsFromRegistry(): Map<string, DiscoverableTool> {
 		const mcpTools = filterBySource(collectDiscoverableTools(this.#toolRegistry.values()), "mcp");
-		return new Map(mcpTools.map(tool => [tool.name, tool] as const));
+		const deferredTools = this.#getDeferredDiscoverableMCPTools?.() ?? [];
+		return new Map([...mcpTools, ...deferredTools].map(tool => [tool.name, tool] as const));
 	}
 
 	#setDiscoverableMCPTools(discoverableMCPTools: Map<string, DiscoverableTool>): void {

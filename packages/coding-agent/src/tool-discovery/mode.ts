@@ -19,6 +19,7 @@ export function resolveEffectiveToolDiscoveryMode(settings: Settings, toolCount:
 	const configuredMode = settings.get("tools.discoveryMode");
 	if (configuredMode === "all" || configuredMode === "mcp-only") return configuredMode;
 	if (settings.get("mcp.discoveryMode")) return "mcp-only";
+	if (settings.get("mcp.lazyDiscovery")) return "mcp-only";
 	if (configuredMode === "auto" && toolCount > TOOL_DISCOVERY_AUTO_THRESHOLD) return "mcp-only";
 	return "off";
 }

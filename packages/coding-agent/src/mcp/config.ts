@@ -40,6 +40,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
 	const shared = {
 		enabled: server.enabled,
+		description: server.description,
 		timeout: server.timeout,
 		auth: server.auth,
 		oauth: server.oauth,

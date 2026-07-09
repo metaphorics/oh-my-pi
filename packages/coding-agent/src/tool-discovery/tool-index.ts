@@ -16,12 +16,19 @@ export interface DiscoverableTool {
 	serverName?: string;
 	/** MCP only */
 	mcpToolName?: string;
+	/** MCP lazy-discovery pseudo-entry for a server whose tools are not loaded yet. */
+	deferredServer?: boolean;
 	schemaKeys: string[];
 }
 
 export interface DiscoverableToolServerSummary {
 	name: string;
 	toolCount: number;
+	/** True when schemas came from the MCP tool cache without a live connection. */
+	cached?: boolean;
+	/** True when the server is configured but no cached tool schema is available yet. */
+	deferred?: boolean;
+	description?: string;
 }
 
 export interface DiscoverableToolSummary {
@@ -188,8 +195,14 @@ export function filterBySource(tools: DiscoverableTool[], source: DiscoverableTo
 }
 
 export function formatDiscoverableToolServerSummary(server: DiscoverableToolServerSummary): string {
+	const suffix = server.description ? ` — ${server.description.slice(0, 200)}` : "";
+	if (server.deferred) return `${server.name} (deferred)${suffix}`;
+	if (server.cached) {
+		const toolLabel = server.toolCount === 1 ? "tool" : "tools";
+		return `${server.name} (${server.toolCount} ${toolLabel} cached)${suffix}`;
+	}
 	const toolLabel = server.toolCount === 1 ? "tool" : "tools";
-	return `${server.name} (${server.toolCount} ${toolLabel})`;
+	return `${server.name} (${server.toolCount} ${toolLabel})${suffix}`;
 }
 
 export function selectDiscoverableToolNamesByServer(

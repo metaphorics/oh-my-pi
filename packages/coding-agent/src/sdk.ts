@@ -1592,6 +1592,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			isMCPDiscoveryEnabled: () => session.isMCPDiscoveryEnabled(),
 			getSelectedMCPToolNames: () => session.getSelectedMCPToolNames(),
 			activateDiscoveredMCPTools: toolNames => session.activateDiscoveredMCPTools(toolNames),
+			refreshMCPTools: tools => session.refreshMCPTools(tools),
 			// Generic tool discovery (unified — covers built-in + MCP + extension)
 			isToolDiscoveryEnabled: () => session.isToolDiscoveryEnabled(),
 			getDiscoverableTools: filter => session.getDiscoverableTools(filter),
@@ -1680,6 +1681,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		toolSession.mcpManager = mcpManager;
 		const enableMCP = options.enableMCP ?? true;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
+		const lazyMCPDiscovery = settings.get("mcp.lazyDiscovery") === true;
+		const lazyMCPDiscoveryDefaultServers = settings.get("mcp.discoveryDefaultServers") ?? [];
 		const customTools: CustomTool[] = [];
 		let startDeferredMCPDiscovery:
 			| ((liveSession: AgentSession, activation: DeferredMCPActivation) => void)
@@ -1697,6 +1700,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			filterExa: true,
 			// Filter browser MCP servers when builtin browser tool is active
 			filterBrowser: settings.get("browser.enabled") ?? false,
+			discoveryDefaultServers: lazyMCPDiscoveryDefaultServers,
 		};
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
@@ -1709,97 +1713,131 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					mcpManager.setNotificationsEnabled(true);
 				}
 
-				const deferredMCPManager = mcpManager;
-				startDeferredMCPDiscovery = (liveSession, activation) => {
-					void (async () => {
-						try {
-							const mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
-								deferredMCPManager.discoverAndConnect(mcpDiscoverOptions),
-							);
-							// The session can be torn down while servers are still connecting.
-							// Don't resurrect tools on a disposed session, and don't leak the
-							// transports/subprocesses the connect just spawned.
-							if (liveSession.isDisposed) {
-								await deferredMCPManager.disconnectAll();
-								return;
-							}
-							applyMCPEnvironment(mcpResult);
-							logMCPLoadErrors(mcpResult.errors);
-							// `tools.discoveryMode: "auto"` was resolved against a registry that
-							// held only built-ins plus persisted placeholder names. Recompute with
-							// the real MCP tool count: a large toolset must flip discovery on
-							// BEFORE the refresh, or activateAll would dump every MCP tool into
-							// the active set with no search_tool_bm25 registered.
-							let discoveryEnabled = activation.mcpDiscoveryEnabled;
-							let activateAll = activation.activateAllMCPTools;
-							if (!discoveryEnabled) {
-								const nonMCPToolNames = [...toolRegistry.keys()].filter(name => !isMCPToolName(name));
-								const projectedMode = resolveEffectiveToolDiscoveryMode(
-									settings,
-									countToolsForAutoDiscovery([...nonMCPToolNames, ...mcpResult.tools.map(tool => tool.name)]),
+				if (lazyMCPDiscovery) {
+					const lazyManager = mcpManager;
+					const mcpResult = await logger.time("discoverDeferredMCPTools", () =>
+						lazyManager.discoverDeferred(mcpDiscoverOptions),
+					);
+					applyMCPEnvironment(mcpResult);
+					logMCPLoadErrors(mcpResult.errors);
+					customTools.push(...mcpResult.tools);
+				} else {
+					const deferredMCPManager = mcpManager;
+					startDeferredMCPDiscovery = (liveSession, activation) => {
+						void (async () => {
+							try {
+								const mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
+									deferredMCPManager.discoverAndConnect(mcpDiscoverOptions),
 								);
-								if (projectedMode !== "off") {
-									effectiveDiscoveryMode = projectedMode;
-									mcpDiscoveryEnabled = true;
-									discoveryEnabled = true;
-									activateAll = false;
-									liveSession.enableMCPDiscovery();
-									if (!toolRegistry.has("search_tool_bm25")) {
-										const searchTool: Tool = new SearchToolBm25Tool(toolSession);
-										toolRegistry.set(
-											searchTool.name,
-											new ExtensionToolWrapper(wrapToolWithMetaNotice(searchTool), extensionRunner) as Tool,
-										);
+								// The session can be torn down while servers are still connecting.
+								// Don't resurrect tools on a disposed session, and don't leak the
+								// transports/subprocesses the connect just spawned.
+								if (liveSession.isDisposed) {
+									await deferredMCPManager.disconnectAll();
+									return;
+								}
+								applyMCPEnvironment(mcpResult);
+								logMCPLoadErrors(mcpResult.errors);
+								// `tools.discoveryMode: "auto"` was resolved against a registry that
+								// held only built-ins plus persisted placeholder names. Recompute with
+								// the real MCP tool count: a large toolset must flip discovery on
+								// BEFORE the refresh, or activateAll would dump every MCP tool into
+								// the active set with no search_tool_bm25 registered.
+								let discoveryEnabled = activation.mcpDiscoveryEnabled;
+								let activateAll = activation.activateAllMCPTools;
+								if (!discoveryEnabled) {
+									const nonMCPToolNames = [...toolRegistry.keys()].filter(name => !isMCPToolName(name));
+									const projectedMode = resolveEffectiveToolDiscoveryMode(
+										settings,
+										countToolsForAutoDiscovery([
+											...nonMCPToolNames,
+											...mcpResult.tools.map(tool => tool.name),
+										]),
+									);
+									if (projectedMode !== "off") {
+										effectiveDiscoveryMode = projectedMode;
+										mcpDiscoveryEnabled = true;
+										discoveryEnabled = true;
+										activateAll = false;
+										liveSession.enableMCPDiscovery();
+										if (!toolRegistry.has("search_tool_bm25")) {
+											const searchTool: Tool = new SearchToolBm25Tool(toolSession);
+											toolRegistry.set(
+												searchTool.name,
+												new ExtensionToolWrapper(
+													wrapToolWithMetaNotice(searchTool),
+													extensionRunner,
+												) as Tool,
+											);
+										}
+										await liveSession.setActiveToolsByName([
+											...liveSession.getActiveToolNames(),
+											"search_tool_bm25",
+										]);
 									}
-									await liveSession.setActiveToolsByName([
-										...liveSession.getActiveToolNames(),
-										"search_tool_bm25",
-									]);
 								}
-							}
-							await liveSession.refreshMCPTools(mcpResult.tools, { activateAll });
-							if (activation.explicitlyRequestedMCPToolNames.length > 0) {
-								if (discoveryEnabled && !activation.mcpDiscoveryEnabled) {
-									// Discovery flipped on mid-flight: route the explicit request
-									// through discovery-aware activation so selection persists.
-									await liveSession.activateDiscoveredMCPTools(activation.explicitlyRequestedMCPToolNames);
-								} else if (!discoveryEnabled) {
-									await liveSession.setActiveToolsByName([
-										...liveSession.getActiveToolNames(),
-										...activation.explicitlyRequestedMCPToolNames,
-									]);
+								await liveSession.refreshMCPTools(mcpResult.tools, { activateAll });
+								if (activation.explicitlyRequestedMCPToolNames.length > 0) {
+									if (discoveryEnabled && !activation.mcpDiscoveryEnabled) {
+										// Discovery flipped on mid-flight: route the explicit request
+										// through discovery-aware activation so selection persists.
+										await liveSession.activateDiscoveredMCPTools(activation.explicitlyRequestedMCPToolNames);
+									} else if (!discoveryEnabled) {
+										await liveSession.setActiveToolsByName([
+											...liveSession.getActiveToolNames(),
+											...activation.explicitlyRequestedMCPToolNames,
+										]);
+									}
 								}
+							} catch (error) {
+								logger.error("MCP tool load failed", {
+									path: ".mcp.json",
+									error: error instanceof Error ? error.message : String(error),
+								});
 							}
-						} catch (error) {
-							logger.error("MCP tool load failed", {
-								path: ".mcp.json",
-								error: error instanceof Error ? error.message : String(error),
-							});
-						}
-					})();
-				};
+						})();
+					};
+				}
 			} else {
-				const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
-					...mcpDiscoverOptions,
-					cacheStorage: settings.getStorage(),
-					authStorage,
-				});
-				mcpManager = mcpResult.manager;
-				toolSession.mcpManager = mcpManager;
+				if (lazyMCPDiscovery) {
+					const cacheStorage = settings.getStorage();
+					mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+					mcpManager.setAuthStorage(authStorage);
+					toolSession.mcpManager = mcpManager;
 
-				if (settings.get("mcp.notifications")) {
-					mcpManager.setNotificationsEnabled(true);
-				}
-				applyMCPEnvironment(mcpResult);
+					if (settings.get("mcp.notifications")) {
+						mcpManager.setNotificationsEnabled(true);
+					}
+					const lazyManager = mcpManager;
+					const mcpResult = await logger.time("discoverDeferredMCPTools", () =>
+						lazyManager.discoverDeferred(mcpDiscoverOptions),
+					);
+					applyMCPEnvironment(mcpResult);
+					logMCPLoadErrors(mcpResult.errors);
+					customTools.push(...mcpResult.tools);
+				} else {
+					const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
+						...mcpDiscoverOptions,
+						cacheStorage: settings.getStorage(),
+						authStorage,
+					});
+					mcpManager = mcpResult.manager;
+					toolSession.mcpManager = mcpManager;
 
-				// Log MCP errors
-				for (const { path, error } of mcpResult.errors) {
-					logger.error("MCP tool load failed", { path, error });
-				}
+					if (settings.get("mcp.notifications")) {
+						mcpManager.setNotificationsEnabled(true);
+					}
+					applyMCPEnvironment(mcpResult);
 
-				if (mcpResult.tools.length > 0) {
-					// MCP tools are LoadedCustomTool, extract the tool property
-					customTools.push(...mcpResult.tools.map(loaded => loaded.tool));
+					// Log MCP errors
+					for (const { path, error } of mcpResult.errors) {
+						logger.error("MCP tool load failed", { path, error });
+					}
+
+					if (mcpResult.tools.length > 0) {
+						// MCP tools are LoadedCustomTool, extract the tool property
+						customTools.push(...mcpResult.tools.map(loaded => loaded.tool));
+					}
 				}
 			}
 		}
@@ -2330,7 +2368,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		): Promise<BuildSystemPromptResult> => {
 			toolContextStore.setToolNames(toolNames);
 			const discoverableMCPTools: DiscoverableTool[] = mcpDiscoveryEnabled
-				? filterBySource(collectDiscoverableTools(tools.values()), "mcp")
+				? [
+						...filterBySource(collectDiscoverableTools(tools.values()), "mcp"),
+						...(mcpManager?.getDeferredDiscoverableTools() ?? []),
+					]
 				: [];
 			const activeToolNames = new Set(toolNames);
 			const discoverableBuiltinTools: DiscoverableTool[] =
@@ -2344,10 +2385,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: [];
 			const discoverableToolsForDesc: DiscoverableTool[] = [...discoverableBuiltinTools, ...discoverableMCPTools];
 			const discoverableToolSummary = summarizeDiscoverableTools(discoverableToolsForDesc);
+			const lazyMcpServerSummaries = lazyMCPDiscovery
+				? (mcpManager?.getDiscoverableServerSummaries() ?? [])
+				: undefined;
+			const promptMcpServerSummaries = lazyMcpServerSummaries ?? discoverableToolSummary.servers;
 			const hasDiscoverableTools =
-				mcpDiscoveryEnabled && toolNames.includes("search_tool_bm25") && discoverableToolsForDesc.length > 0;
+				mcpDiscoveryEnabled &&
+				toolNames.includes("search_tool_bm25") &&
+				(discoverableToolsForDesc.length > 0 || promptMcpServerSummaries.length > 0);
 			const promptTools = buildSystemPromptToolMetadata(tools, {
-				search_tool_bm25: { description: renderSearchToolBm25Description(discoverableToolsForDesc) },
+				search_tool_bm25: {
+					description: renderSearchToolBm25Description(discoverableToolsForDesc, promptMcpServerSummaries),
+				},
 			});
 			const memoryBackend = await resolveMemoryBackend(settings);
 			const memoryInstructions = await memoryBackend.buildDeveloperInstructions(agentDir, settings, session);
@@ -2411,7 +2460,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				nativeTools,
 				intentField,
 				mcpDiscoveryMode: hasDiscoverableTools,
-				mcpDiscoveryServerSummaries: discoverableToolSummary.servers.map(formatDiscoverableToolServerSummary),
+				mcpDiscoveryServerSummaries: promptMcpServerSummaries.map(formatDiscoverableToolServerSummary),
 				eagerTasks,
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
@@ -2481,7 +2530,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			? requestedActiveToolNames.filter(name => name.startsWith("mcp__"))
 			: [];
 		const discoveryDefaultServers = new Set(
-			(settings.get("mcp.discoveryDefaultServers") ?? []).map(serverName => serverName.trim()).filter(Boolean),
+			lazyMCPDiscoveryDefaultServers.map(serverName => serverName.trim()).filter(Boolean),
 		);
 		const discoveryDefaultServerToolNames = mcpDiscoveryEnabled
 			? selectDiscoverableToolNamesByServer(
@@ -2878,6 +2927,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						return out;
 					}
 				: undefined,
+			getDeferredDiscoverableMCPTools: mcpManager ? () => mcpManager.getDeferredDiscoverableTools() : undefined,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			mcpDiscoveryEnabled,
 			initialSelectedMCPToolNames,

@@ -113,6 +113,10 @@
           "type": "boolean",
           "description": "Whether OMP should try to connect this server."
         },
+        "description": {
+          "type": "string",
+          "description": "Human-readable server description shown in lazy discovery summaries."
+        },
         "timeout": {
           "type": "number",
           "minimum": 0,

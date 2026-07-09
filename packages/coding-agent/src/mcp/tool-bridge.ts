@@ -247,6 +247,10 @@ export function createMCPToolName(serverName: string, toolName: string): string 
 	return `mcp__${sanitizedServerName}_${normalizedToolName}`;
 }
 
+export function createMCPServerToolName(serverName: string): string {
+	return `mcp__${sanitizeMCPToolNamePart(serverName, "server")}`;
+}
+
 /**
  * Parse an MCP tool name back to server and tool components.
  *

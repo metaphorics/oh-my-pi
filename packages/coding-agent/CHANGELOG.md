@@ -6,6 +6,7 @@
 
 - Added an opt-in local global memory bank. When `memory.backend=local` and `memory.globalBank` is enabled, the `learn` tool can write cross-project lessons with `scope: "global"`, prompt injection reads the global bank before project memory, and `memory://global` resolves the bank's `learned.md`.
 - Added Nomnoml diagram rendering with a `/settings` mode for SVG images, ASCII fallback, or highlighted fences; when active, Nomnoml replaces the Mermaid prompt/rendering hint.
+- Added opt-in lazy MCP discovery (`mcp.lazyDiscovery`) so configured MCP servers can be advertised from config and cached schemas without connecting at startup; matching or calling a lazy tool connects only the selected server on demand.
 - `/guided-goal` now injects project context files (AGENTS.md and the like) as an untrusted `<repository-context>` system block so interview questions and drafted objectives ground in the real repo. Failures and empty projects keep the previous context-free behavior.
 
 ### Changed

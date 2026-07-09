@@ -11,6 +11,7 @@ import {
 	buildDiscoverableToolSearchIndex,
 	type DiscoverableTool,
 	type DiscoverableToolSearchIndex,
+	type DiscoverableToolServerSummary,
 	filterBySource,
 	formatDiscoverableToolServerSummary,
 	searchDiscoverableTools,
@@ -51,6 +52,7 @@ export interface SearchToolBm25Details {
 	activated_tools: string[];
 	active_selected_tools: string[];
 	tools: SearchToolBm25Match[];
+	unavailable_servers?: string[];
 }
 
 function formatMatch(tool: DiscoverableTool, score: number): SearchToolBm25Match {
@@ -66,12 +68,16 @@ function formatMatch(tool: DiscoverableTool, score: number): SearchToolBm25Match
 }
 
 function buildSearchToolBm25Content(details: SearchToolBm25Details): string {
-	return JSON.stringify({
+	const payload: Record<string, unknown> = {
 		query: details.query,
 		activated_tools: details.activated_tools,
 		match_count: details.tools.length,
 		total_tools: details.total_tools,
-	});
+	};
+	if (details.unavailable_servers && details.unavailable_servers.length > 0) {
+		payload.unavailable_servers = details.unavailable_servers;
+	}
+	return JSON.stringify(payload);
 }
 
 /** Get discoverable tools for description rendering. Falls back to empty array on error. */
@@ -141,15 +147,54 @@ function isDiscoveryEnabled(session: ToolSession): boolean {
 	return session.isMCPDiscoveryEnabled?.() ?? false;
 }
 
-export function renderSearchToolBm25Description(discoverableTools: DiscoverableTool[] = []): string {
+function getLazyMCPServerName(session: ToolSession, tool: DiscoverableTool): string | undefined {
+	if (tool.source !== "mcp" || !tool.serverName || !session.mcpManager) return undefined;
+	if (session.mcpManager.getConnection(tool.serverName)) return undefined;
+	if (!session.mcpManager.getServerConfig(tool.serverName)) return undefined;
+	return tool.serverName;
+}
+
+async function connectLazyMCPMatches(
+	session: ToolSession,
+	ranked: Array<{ tool: DiscoverableTool; score: number }>,
+): Promise<{ attempted: boolean; unavailable: string[] }> {
+	if (!session.mcpManager) return { attempted: false, unavailable: [] };
+	const serverNames = [
+		...new Set(
+			ranked
+				.map(result => getLazyMCPServerName(session, result.tool))
+				.filter((serverName): serverName is string => typeof serverName === "string"),
+		),
+	];
+	const unavailable: string[] = [];
+	let connected = false;
+	for (const serverName of serverNames) {
+		try {
+			await session.mcpManager.connectServerOnDemand(serverName);
+			connected = true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			unavailable.push(`server "${serverName}" unavailable: ${message}`);
+		}
+	}
+	if (connected) {
+		await session.refreshMCPTools?.(session.mcpManager.getTools());
+	}
+	return { attempted: serverNames.length > 0, unavailable };
+}
+
+export function renderSearchToolBm25Description(
+	discoverableTools: DiscoverableTool[] = [],
+	serverSummaries?: DiscoverableToolServerSummary[],
+): string {
 	const summary = summarizeDiscoverableTools(discoverableTools);
 	const builtinToolNames = filterBySource(discoverableTools, "builtin")
 		.map(t => t.name)
 		.sort();
 	return prompt.render(searchToolBm25Description, {
 		discoverableToolCount: summary.toolCount,
-		discoverableMCPServerSummaries: summary.servers.map(formatDiscoverableToolServerSummary),
-		hasDiscoverableMCPServers: summary.servers.length > 0,
+		discoverableMCPServerSummaries: (serverSummaries ?? summary.servers).map(formatDiscoverableToolServerSummary),
+		hasDiscoverableMCPServers: (serverSummaries ?? summary.servers).length > 0,
 		discoverableBuiltinToolNames: builtinToolNames,
 		hasDiscoverableBuiltinTools: builtinToolNames.length > 0,
 	});
@@ -249,8 +294,8 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			throw new ToolError("Limit must be a positive integer.");
 		}
 
-		const searchIndex = getDiscoverableToolSearchIndexForExecution(this.session);
-		const selectedToolNames = new Set(getSelectedToolNames(this.session));
+		let searchIndex = getDiscoverableToolSearchIndexForExecution(this.session);
+		let selectedToolNames = new Set(getSelectedToolNames(this.session));
 		let ranked: Array<{ tool: DiscoverableTool; score: number }> = [];
 		try {
 			ranked = searchDiscoverableTools(searchIndex, query, searchIndex.documents.length)
@@ -262,11 +307,21 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			}
 			throw error;
 		}
+
+		const lazyConnections = await connectLazyMCPMatches(this.session, ranked);
+		const unavailableServers = lazyConnections.unavailable;
+		if (lazyConnections.attempted) {
+			searchIndex = buildDiscoverableToolSearchIndex(getDiscoverableToolsForDescription(this.session));
+			selectedToolNames = new Set(getSelectedToolNames(this.session));
+			ranked = searchDiscoverableTools(searchIndex, query, searchIndex.documents.length)
+				.filter(result => !selectedToolNames.has(result.tool.name))
+				.slice(0, limit);
+		}
 		const activated =
 			ranked.length > 0
 				? await activateTools(
 						this.session,
-						ranked.map(result => result.tool.name),
+						ranked.filter(result => !result.tool.deferredServer).map(result => result.tool.name),
 					)
 				: [];
 
@@ -277,6 +332,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			activated_tools: activated,
 			active_selected_tools: getSelectedToolNames(this.session),
 			tools: ranked.map(result => formatMatch(result.tool, result.score)),
+			unavailable_servers: unavailableServers.length > 0 ? unavailableServers : undefined,
 		};
 
 		return {

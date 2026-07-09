@@ -11,6 +11,7 @@ import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { checkRubyKernelAvailability } from "../eval/rb/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
+import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
@@ -299,6 +300,8 @@ export interface ToolSession {
 	getSelectedMCPToolNames?: () => string[];
 	/** Merge MCP tool selections into the active session tool set. */
 	activateDiscoveredMCPTools?: (toolNames: string[]) => Promise<string[]>;
+	/** Refresh the session's MCP tool registry after an on-demand MCP connection. */
+	refreshMCPTools?: (tools: CustomTool[]) => Promise<void>;
 	// ── Generic tool discovery (unified — covers built-in + MCP + extension) ──
 	/** Whether any form of tool discovery is active (tools.discoveryMode !== "off" or mcp.discoveryMode). */
 	isToolDiscoveryEnabled?: () => boolean;

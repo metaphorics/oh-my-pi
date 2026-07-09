@@ -25,6 +25,7 @@ interface MCPConfigFile {
 		string,
 		{
 			enabled?: boolean;
+			description?: string;
 			timeout?: number;
 			command?: string;
 			args?: string[];
@@ -86,6 +87,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 			const server: MCPServer = {
 				name,
 				enabled,
+				description: typeof serverConfig.description === "string" ? serverConfig.description : undefined,
 				timeout,
 				command: serverConfig.command,
 				args: serverConfig.args,

@@ -1303,7 +1303,9 @@ export class MCPCommandController {
 					const state =
 						config.enabled === false
 							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
+							: this.ctx.mcpManager?.isServerDeferred(name)
+								? "deferred"
+								: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
 							? theme.fg("warning", " ◌ inactive")
@@ -1311,7 +1313,9 @@ export class MCPCommandController {
 								? theme.fg("success", " ● connected")
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+									: state === "deferred"
+										? theme.fg("muted", " ◌ deferred")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1326,7 +1330,9 @@ export class MCPCommandController {
 					const state =
 						config.enabled === false
 							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
+							: this.ctx.mcpManager?.isServerDeferred(name)
+								? "deferred"
+								: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
 							? theme.fg("warning", " ◌ inactive")
@@ -1334,7 +1340,9 @@ export class MCPCommandController {
 								? theme.fg("success", " ● connected")
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+									: state === "deferred"
+										? theme.fg("muted", " ◌ deferred")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1343,15 +1351,19 @@ export class MCPCommandController {
 			// Show discovered servers (from .claude.json, .cursor/mcp.json, .vscode/mcp.json, etc.)
 			if (discoveredServers.length > 0) {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
+					const manager = this.ctx.mcpManager;
+					if (!manager) continue;
 					lines.push(theme.fg("accent", providerName) + theme.fg("muted", ` (${shortPath}):`));
 					for (const { name } of entries) {
-						const state = this.ctx.mcpManager!.getConnectionStatus(name);
+						const state = manager.isServerDeferred(name) ? "deferred" : manager.getConnectionStatus(name);
 						const status =
 							state === "connected"
 								? theme.fg("success", " ● connected")
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+									: state === "deferred"
+										? theme.fg("muted", " ◌ deferred")
+										: theme.fg("muted", " ○ not connected");
 						lines.push(`  ${theme.fg("accent", name)}${status}`);
 					}
 					lines.push("");
