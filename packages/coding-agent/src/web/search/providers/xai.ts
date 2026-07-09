@@ -8,7 +8,7 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const XAI_RESPONSES_URL = "https://api.x.ai/v1/responses";
-const XAI_WEB_SEARCH_MODEL = "grok-4.3";
+const XAI_WEB_SEARCH_MODEL = "grok-4.5";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;
 
