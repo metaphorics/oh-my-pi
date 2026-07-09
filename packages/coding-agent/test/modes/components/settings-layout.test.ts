@@ -97,6 +97,23 @@ describe("settings layout", () => {
 		}
 	});
 
+	it("gates the global memory bank setting to the local backend", () => {
+		const def = getSettingsForTab("memory").find(def => def.path === "memory.globalBank");
+
+		expect(def).toMatchObject({
+			path: "memory.globalBank",
+			type: "boolean",
+			tab: "memory",
+			group: "General",
+			label: "Global Memory Bank",
+		});
+		expect(def?.condition?.()).toBe(false);
+
+		Settings.instance.set("memory.backend", "local");
+
+		expect(def?.condition?.()).toBe(true);
+	});
+
 	it("shows provider request limits as a providers services submenu setting", () => {
 		const [def] = getSettingsForTab("providers").filter(item => item.path === "providers.maxInFlightRequests");
 

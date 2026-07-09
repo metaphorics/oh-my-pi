@@ -153,6 +153,7 @@ interface MemoryInstructionSession {
 
 interface MemoryToolDeveloperInstructionsSnapshot {
 	summary: string;
+	globalLearned: string;
 	learned: string;
 }
 
@@ -172,6 +173,18 @@ function getMemoryInstructionRoot(agentDir: string, settings: Settings): string 
 	return getMemoryRoot(agentDir, settings.getCwd());
 }
 
+function isGlobalMemoryBankEnabled(settings: Settings): boolean {
+	try {
+		return settings.get("memory.backend") === "local" && settings.get("memory.globalBank") === true;
+	} catch {
+		return false;
+	}
+}
+
+function getMemoryInstructionGlobalRoot(agentDir: string, settings: Settings): string | undefined {
+	return isGlobalMemoryBankEnabled(settings) ? getGlobalMemoryRoot(agentDir) : undefined;
+}
+
 function getMemoryInstructionSessionFile(session: MemoryInstructionSession): string | undefined {
 	return session.sessionManager.getSessionFile() ?? undefined;
 }
@@ -183,6 +196,7 @@ async function readMemoryToolDeveloperInstructionsSnapshot(
 	const cfg = loadMemoryConfig(settings);
 	if (!cfg.enabled) return undefined;
 	const memoryRoot = getMemoryInstructionRoot(agentDir, settings);
+	const globalRoot = getMemoryInstructionGlobalRoot(agentDir, settings);
 
 	let summary = "";
 	try {
@@ -191,8 +205,9 @@ async function readMemoryToolDeveloperInstructionsSnapshot(
 		// Missing or unreadable summary — injection is best-effort; fall through
 		// so any captured lessons still surface on their own.
 	}
+	const globalLearned = globalRoot ? await readLearnedLessons(globalRoot) : "";
 	const learned = await readLearnedLessons(memoryRoot);
-	return { summary, learned };
+	return { summary, globalLearned, learned };
 }
 
 function renderMemoryToolDeveloperInstructionsSnapshot(
@@ -202,7 +217,7 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	if (!snapshot) return undefined;
 	const cfg = loadMemoryConfig(settings);
 	if (!cfg.enabled) return undefined;
-	if (!snapshot.summary && !snapshot.learned) return undefined;
+	if (!snapshot.summary && !snapshot.globalLearned && !snapshot.learned) return undefined;
 
 	const summaryOut = snapshot.summary
 		? truncateByApproxTokens(snapshot.summary, cfg.summaryInjectionTokenLimit).trim()
@@ -214,12 +229,21 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	// can exceed `limit * 4` chars and drive the remainder negative — when the
 	// summary already fills the budget, lessons are simply dropped.
 	const learnedBudget = Math.max(0, cfg.summaryInjectionTokenLimit - Math.ceil(summaryOut.length / 4));
+	const globalLearnedOut =
+		snapshot.globalLearned && learnedBudget > 0
+			? truncateByApproxTokens(snapshot.globalLearned, learnedBudget).trim()
+			: "";
+	const projectLearnedBudget = Math.max(0, learnedBudget - Math.ceil(globalLearnedOut.length / 4));
 	const learnedOut =
-		snapshot.learned && learnedBudget > 0 ? truncateByApproxTokens(snapshot.learned, learnedBudget).trim() : "";
-	if (!summaryOut && !learnedOut) return undefined;
+		snapshot.learned && projectLearnedBudget > 0
+			? truncateByApproxTokens(snapshot.learned, projectLearnedBudget).trim()
+			: "";
+	if (!summaryOut && !globalLearnedOut && !learnedOut) return undefined;
 
 	return prompt.render(readPathTemplate, {
 		memory_summary: summaryOut,
+		global_enabled: isGlobalMemoryBankEnabled(settings),
+		global_learned: globalLearnedOut,
 		learned: learnedOut,
 	});
 }
@@ -262,9 +286,12 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	const current = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
 	const root = getMemoryInstructionRoot(agentDir, settings);
 	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
+	const cachedGlobalLearned =
+		cached && cached.sessionFile === sessionFile ? cached.snapshot?.globalLearned : undefined;
 	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
+	const globalLearned = cachedGlobalLearned ?? baseline?.globalLearned ?? "";
 	const learned = cachedLearned ?? baseline?.learned ?? "";
-	const snapshot = current ? { summary: current.summary, learned } : undefined;
+	const snapshot = current ? { summary: current.summary, globalLearned, learned } : undefined;
 	cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
 }
 
@@ -1251,6 +1278,10 @@ export function getMemoryRoot(agentDir: string, cwd: string): string {
 	return path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd));
 }
 
+export function getGlobalMemoryRoot(agentDir: string): string {
+	return path.join(getMemoriesDir(agentDir), "global");
+}
+
 /**
  * Filename of the captured-lessons file under a project's memory root.
  *
@@ -1301,25 +1332,21 @@ function normalizeLearnedText(text: string, maxChars: number): string {
 const learnedWriteChains = new Map<string, Promise<unknown>>();
 
 /**
- * Append one lesson to the project's `learned.md` (newest-first, deduped,
- * capped, secret-redacted, injection-neutralized). The file backs the `learn`
- * tool when `memory.backend` is `local`.
+ * Append one lesson to `root`/learned.md (newest-first, deduped, capped,
+ * secret-redacted, injection-neutralized). The file backs the `learn` tool
+ * when `memory.backend` is `local`.
  */
-export async function saveLearnedLesson(
-	agentDir: string,
-	cwd: string,
-	input: MemoryBackendSaveInput,
-): Promise<MemoryBackendSaveResult> {
+async function saveLearnedLessonAt(root: string, input: MemoryBackendSaveInput): Promise<MemoryBackendSaveResult> {
 	const content = normalizeLearnedText(input.content, MAX_LEARNED_CONTENT_CHARS);
 	if (!content) {
 		return { backend: "local", stored: 0, message: "Empty lesson; nothing stored." };
 	}
 	const context = input.context ? normalizeLearnedText(input.context, MAX_LEARNED_CONTEXT_CHARS) : "";
 	const line = context ? `- ${content} _(context: ${context})_` : `- ${content}`;
-	const filePath = path.join(getMemoryRoot(agentDir, cwd), LEARNED_LESSONS_FILE);
+	const filePath = path.join(root, LEARNED_LESSONS_FILE);
 
 	// Serialize the read-modify-write per file: parallel `learn` calls (sibling
-	// subagents, or two shared tool calls in one turn) share the project memory
+	// subagents, or two shared tool calls in one turn) share the same memory
 	// root, so an unguarded RMW would let the last writer drop the other's lesson.
 	const run = (learnedWriteChains.get(filePath) ?? Promise.resolve()).then(() => appendLearnedLine(filePath, line));
 	const guarded = run.catch(() => {});
@@ -1332,6 +1359,26 @@ export async function saveLearnedLesson(
 		if (learnedWriteChains.get(filePath) === guarded) learnedWriteChains.delete(filePath);
 	}
 	return { backend: "local", stored: 1, message: `Lesson saved to ${LEARNED_LESSONS_FILE}.` };
+}
+
+/**
+ * Append one lesson to the project's `learned.md` (newest-first, deduped,
+ * capped, secret-redacted, injection-neutralized). The file backs the `learn`
+ * tool when `memory.backend` is `local`.
+ */
+export async function saveLearnedLesson(
+	agentDir: string,
+	cwd: string,
+	input: MemoryBackendSaveInput,
+): Promise<MemoryBackendSaveResult> {
+	return saveLearnedLessonAt(getMemoryRoot(agentDir, cwd), input);
+}
+
+export async function saveGlobalLearnedLesson(
+	agentDir: string,
+	input: MemoryBackendSaveInput,
+): Promise<MemoryBackendSaveResult> {
+	return saveLearnedLessonAt(getGlobalMemoryRoot(agentDir), input);
 }
 
 async function appendLearnedLine(filePath: string, line: string): Promise<void> {

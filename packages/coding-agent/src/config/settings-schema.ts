@@ -2401,6 +2401,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"memory.globalBank": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "General",
+			label: "Global Memory Bank",
+			description:
+				'Keep an additional cross-project bank; learn can target it with scope: "global". Clearing memory remains project-scoped.',
+			condition: "localActive",
+		},
+	},
+
 	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
 	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.
 	// Master flag is default-off → zero footprint; sub-flags gate behaviour.

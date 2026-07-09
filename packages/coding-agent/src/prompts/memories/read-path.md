@@ -1,5 +1,8 @@
 # Memory Guidance
 Memory root: memory://root
+{{#if global_enabled}}
+Global memory root: memory://global (`learned.md` only; baseline guidance before project memory)
+{{/if}}
 Operational rules:
 1) Read `memory://root/memory_summary.md` first.
 2) If needed, inspect `memory://root/MEMORY.md` and `memory://root/skills/<name>/SKILL.md`.
@@ -11,7 +14,11 @@ Operational rules:
 Memory summary:
 {{memory_summary}}
 {{/if}}
+{{#if global_learned}}
+Learned lessons (global cross-project baseline; durable but may be stale — verify against the repo before relying on them):
+{{global_learned}}
+{{/if}}
 {{#if learned}}
-Learned lessons (captured via the `learn` tool; durable but may be stale — verify against the repo before relying on them):
+Learned lessons (project-specific; captured via the `learn` tool; durable but may be stale — verify against the repo before relying on them):
 {{learned}}
 {{/if}}

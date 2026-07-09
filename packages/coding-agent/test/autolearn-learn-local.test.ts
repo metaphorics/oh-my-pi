@@ -5,8 +5,10 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildMemoryToolDeveloperInstructions,
+	getGlobalMemoryRoot,
 	getMemoryRoot,
 	refreshMemoryToolDeveloperInstructionsCacheAfterStartup,
+	saveGlobalLearnedLesson,
 	saveLearnedLesson,
 } from "@oh-my-pi/pi-coding-agent/memories";
 import { localBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/local-backend";
@@ -234,6 +236,20 @@ describe("learned-lesson read-back", () => {
 		expect(out).toContain("- A captured lesson");
 	});
 
+	it("injects global lessons before project lessons when the global bank is enabled", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local", "memory.globalBank": true });
+		await saveGlobalLearnedLesson(agentDir, { content: "Global baseline lesson" });
+		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "Project-specific lesson" });
+
+		const out = await buildMemoryToolDeveloperInstructions(agentDir, settings);
+
+		expect(out).toContain("memory://global");
+		const globalIndex = out?.indexOf("- Global baseline lesson") ?? -1;
+		const projectIndex = out?.indexOf("- Project-specific lesson") ?? -1;
+		expect(globalIndex).toBeGreaterThanOrEqual(0);
+		expect(projectIndex).toBeGreaterThan(globalIndex);
+	});
+
 	it("returns undefined when the memory backend is off", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "Present but gated" });
@@ -280,19 +296,25 @@ describe("learn tool (local backend)", () => {
 	let agentDir: string;
 	let projCwd: string;
 	let learnedFile: string;
+	let globalLearnedFile: string;
 
 	beforeEach(async () => {
 		tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-learn-local-"));
 		agentDir = path.join(tmp, "agent");
 		projCwd = path.join(tmp, "proj");
 		learnedFile = path.join(getMemoryRoot(agentDir, projCwd), "learned.md");
+		globalLearnedFile = path.join(getGlobalMemoryRoot(agentDir), "learned.md");
 	});
 	afterEach(async () => {
 		await removeWithRetries(tmp);
 	});
 
-	function localSession(): ToolSession {
-		const settings = Settings.isolated({ "autolearn.enabled": true, "memory.backend": "local" });
+	function localSession(overrides: Parameters<typeof Settings.isolated>[0] = {}): ToolSession {
+		const settings = Settings.isolated({
+			"autolearn.enabled": true,
+			"memory.backend": "local",
+			...overrides,
+		});
 		spyOn(settings, "getAgentDir").mockReturnValue(agentDir);
 		spyOn(settings, "getCwd").mockReturnValue(projCwd);
 		return {
@@ -316,6 +338,31 @@ describe("learn tool (local backend)", () => {
 	it("execute writes the lesson to learned.md", async () => {
 		await new LearnTool(localSession()).execute("1", { memory: "A local tool lesson" });
 		expect(await Bun.file(learnedFile).text()).toContain("- A local tool lesson");
+		expect(await Bun.file(globalLearnedFile).exists()).toBe(false);
+	});
+
+	it("execute writes global-scoped lessons to the global bank when enabled", async () => {
+		await new LearnTool(localSession({ "memory.globalBank": true })).execute("global-on", {
+			memory: "A global tool lesson",
+			scope: "global",
+		});
+
+		expect(await Bun.file(globalLearnedFile).text()).toContain("- A global tool lesson");
+		expect(await Bun.file(learnedFile).exists()).toBe(false);
+	});
+
+	it("execute falls back to project memory with a note when global scope is disabled", async () => {
+		const result = await new LearnTool(localSession({ "memory.globalBank": false })).execute("global-off", {
+			memory: "Fallback project lesson",
+			scope: "global",
+		});
+
+		expect(result.content[0]).toEqual({
+			type: "text",
+			text: "Lesson stored; global bank disabled, stored in project memory.",
+		});
+		expect(await Bun.file(learnedFile).text()).toContain("- Fallback project lesson");
+		expect(await Bun.file(globalLearnedFile).exists()).toBe(false);
 	});
 
 	it("execute throws when the lesson is empty after sanitization", async () => {

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
+import { getGlobalMemoryRoot, getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import {
 	loadMnemopi,
 	loadMnemopiCore,
@@ -78,6 +78,21 @@ describe("MemoryProtocolHandler", () => {
 		});
 	});
 
+	it("resolves memory://global to global learned.md", async () => {
+		await withMemoryFixture(async ({ agentDir }) => {
+			const globalRoot = getGlobalMemoryRoot(agentDir);
+			await fs.mkdir(globalRoot, { recursive: true });
+			await Bun.write(path.join(globalRoot, "learned.md"), "- global lesson\n");
+
+			const router = InternalUrlRouter.instance();
+			const resource = await router.resolve("memory://global");
+
+			expect(resource.content).toBe("- global lesson\n");
+			expect(resource.contentType).toBe("text/markdown");
+			expect(resource.sourcePath).toBe(path.join(globalRoot, "learned.md"));
+		});
+	});
+
 	it("resolves memory://root/<path> within memory root", async () => {
 		await withMemoryFixture(async ({ memoryRoot }) => {
 			const skillPath = path.join(memoryRoot, "skills", "demo", "SKILL.md");
@@ -96,7 +111,7 @@ describe("MemoryProtocolHandler", () => {
 		await withMemoryFixture(async () => {
 			const router = InternalUrlRouter.instance();
 			await expect(router.resolve("memory://other/memory_summary.md")).rejects.toThrow(
-				/Unknown memory namespace: other\. Supported: root/,
+				/Unknown memory namespace: other\. Supported: root, global/,
 			);
 		});
 	});

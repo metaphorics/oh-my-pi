@@ -2,6 +2,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type } from "arktype";
 import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
+import { saveGlobalLearnedLesson } from "../memories";
 import { localBackend } from "../memory-backend/local-backend";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -9,6 +10,9 @@ import type { ToolSession } from ".";
 const learnSchema = type({
 	memory: type("string").describe("the durable, self-contained lesson to remember (what, when, why)"),
 	"context?": type("string").describe("optional source context for the lesson"),
+	"scope?": type("'project' | 'global'").describe(
+		"where to store the lesson: project (default) or the cross-project global bank (local backend with memory.globalBank enabled; ignored by other backends)",
+	),
 	"skill?": type({
 		action: "'create' | 'update'",
 		name: type("string").describe("kebab-case skill name"),
@@ -79,12 +83,24 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 				throw new Error("Mnemopi did not store the lesson (no memory id returned).");
 			}
 		} else if (backend === "local") {
-			const result = await localBackend.save?.(
-				{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.settings.getCwd() },
-				{ content: params.memory, context: params.context, source: "coding-agent-learn", importance: 0.8 },
-			);
+			const input = {
+				content: params.memory,
+				context: params.context,
+				source: "coding-agent-learn",
+				importance: 0.8,
+			};
+			const result =
+				params.scope === "global" && this.session.settings.get("memory.globalBank") === true
+					? await saveGlobalLearnedLesson(this.session.settings.getAgentDir(), input)
+					: await localBackend.save?.(
+							{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.settings.getCwd() },
+							input,
+						);
 			if (!result || result.stored === 0) {
 				throw new Error("Lesson was empty after sanitization; nothing stored.");
+			}
+			if (params.scope === "global" && this.session.settings.get("memory.globalBank") !== true) {
+				memoryMessage = "Lesson stored; global bank disabled, stored in project memory";
 			}
 		} else {
 			const state = this.session.getHindsightSessionState?.();

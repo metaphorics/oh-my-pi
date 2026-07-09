@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { getMemoryRoot } from "../memories";
+import { getGlobalMemoryRoot, getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import { AgentRegistry } from "../registry/agent-registry";
 import { buildDirectoryResource } from "./filesystem-resource";
@@ -9,7 +9,9 @@ import { validateRelativePath } from "./skill-protocol";
 import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
 
 const DEFAULT_MEMORY_FILE = "memory_summary.md";
+const DEFAULT_GLOBAL_MEMORY_FILE = "learned.md";
 const MEMORY_NAMESPACE = "root";
+const GLOBAL_MEMORY_NAMESPACE = "global";
 
 /**
  * Snapshot of memory roots for every registered session, deduped.
@@ -45,16 +47,21 @@ function toMemoryValidationError(error: unknown): Error {
 export function resolveMemoryUrlToPath(url: InternalUrl, memoryRoot: string): string {
 	const namespace = url.rawHost || url.hostname;
 	if (!namespace) {
-		throw new Error("memory:// URL requires a namespace: memory://root");
+		throw new Error("memory:// URL requires a namespace: memory://root or memory://global");
 	}
-	if (namespace !== MEMORY_NAMESPACE) {
-		throw new Error(`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE}`);
+	if (namespace !== MEMORY_NAMESPACE && namespace !== GLOBAL_MEMORY_NAMESPACE) {
+		throw new Error(
+			`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE}, ${GLOBAL_MEMORY_NAMESPACE}`,
+		);
 	}
 
 	const rawPathname = url.rawPathname ?? url.pathname;
 	const hasPath = rawPathname && rawPathname !== "/" && rawPathname !== "";
 	if (!hasPath) {
-		return path.resolve(memoryRoot, DEFAULT_MEMORY_FILE);
+		return path.resolve(
+			memoryRoot,
+			namespace === GLOBAL_MEMORY_NAMESPACE ? DEFAULT_GLOBAL_MEMORY_FILE : DEFAULT_MEMORY_FILE,
+		);
 	}
 	let relativePath: string;
 	try {
@@ -208,19 +215,36 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl): Promise<InternalResource> {
 		const namespace = url.rawHost || url.hostname;
 		if (!namespace) {
-			throw new Error("memory:// URL requires a namespace: memory://root or memory://<memory-id>");
+			throw new Error("memory:// URL requires a namespace: memory://root, memory://global, or memory://<memory-id>");
+		}
+
+		if (namespace === GLOBAL_MEMORY_NAMESPACE) {
+			const root = getGlobalMemoryRoot(getAgentDir());
+			try {
+				await fs.stat(root);
+			} catch (error) {
+				if (isEnoent(error)) {
+					throw new Error(
+						'Global memory bank is not available yet. Use learn with scope "global" while memory.globalBank is enabled first.',
+					);
+				}
+				throw error;
+			}
+			const result = await tryResolveInRoot(url, root);
+			if (result) return result;
+			throw new Error(`Memory file not found: ${url.href}`);
 		}
 
 		// Mnemopi rows live in SQLite banks per session, keyed by memory id.
-		// Any host other than the file-backed `root` namespace is treated as a
-		// mnemopi memory id lookup. This is the read counterpart to
+		// Any host other than the file-backed `root`/`global` namespaces is
+		// treated as a mnemopi memory id lookup. This is the read counterpart to
 		// `memory_edit update` and lets agents inspect the full content of a
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
 			const mnemopiStates = mnemopiSessionStatesFromRegistry();
 			if (mnemopiStates.length === 0) {
 				throw new Error(
-					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,
+					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE}, ${GLOBAL_MEMORY_NAMESPACE} (file-backed memory), or a mnemopi memory id when memory.backend=mnemopi is active.`,
 				);
 			}
 			const hit = tryResolveMnemopiMemory(namespace);
@@ -263,6 +287,12 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		const completions: UrlCompletion[] = [];
 		if (memoryRootsFromRegistry().length > 0) {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
+		}
+		try {
+			await fs.stat(getGlobalMemoryRoot(getAgentDir()));
+			completions.push({ value: GLOBAL_MEMORY_NAMESPACE, description: "Global learned lessons" });
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
 		}
 		if (mnemopiSessionStatesFromRegistry().length > 0) {
 			completions.push({
