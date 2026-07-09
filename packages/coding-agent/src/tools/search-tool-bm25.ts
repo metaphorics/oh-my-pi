@@ -149,7 +149,8 @@ function isDiscoveryEnabled(session: ToolSession): boolean {
 
 function getLazyMCPServerName(session: ToolSession, tool: DiscoverableTool): string | undefined {
 	if (tool.source !== "mcp" || !tool.serverName || !session.mcpManager) return undefined;
-	if (session.mcpManager.getConnection(tool.serverName)) return undefined;
+	// Always route configured ranked MCP servers through readiness-aware
+	// connectServerOnDemand: a stored connection may still be waiting on listTools.
 	if (!session.mcpManager.getServerConfig(tool.serverName)) return undefined;
 	return tool.serverName;
 }
@@ -157,6 +158,7 @@ function getLazyMCPServerName(session: ToolSession, tool: DiscoverableTool): str
 async function connectLazyMCPMatches(
 	session: ToolSession,
 	ranked: Array<{ tool: DiscoverableTool; score: number }>,
+	signal?: AbortSignal,
 ): Promise<{ attempted: boolean; unavailable: string[]; unavailableServerNames: Set<string> }> {
 	if (!session.mcpManager) return { attempted: false, unavailable: [], unavailableServerNames: new Set() };
 	const serverNames = [
@@ -170,10 +172,12 @@ async function connectLazyMCPMatches(
 	const unavailableServerNames = new Set<string>();
 	let connected = false;
 	for (const serverName of serverNames) {
+		if (signal?.aborted) throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
 		try {
-			await session.mcpManager.connectServerOnDemand(serverName);
+			await session.mcpManager.connectServerOnDemand(serverName, signal);
 			connected = true;
 		} catch (error) {
+			if (signal?.aborted) throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
 			const message = error instanceof Error ? error.message : String(error);
 			unavailable.push(`server "${serverName}" unavailable: ${message}`);
 			unavailableServerNames.add(serverName);
@@ -274,7 +278,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 	async execute(
 		_toolCallId: string,
 		params: SearchToolBm25Params,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<SearchToolBm25Details>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<SearchToolBm25Details>> {
@@ -310,7 +314,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			throw error;
 		}
 
-		const lazyConnections = await connectLazyMCPMatches(this.session, ranked);
+		const lazyConnections = await connectLazyMCPMatches(this.session, ranked, signal);
 		const unavailableServers = lazyConnections.unavailable;
 		const unavailableServerNames = lazyConnections.unavailableServerNames;
 		if (lazyConnections.attempted) {

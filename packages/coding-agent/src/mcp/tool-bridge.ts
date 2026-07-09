@@ -232,8 +232,12 @@ function sanitizeMCPToolNamePart(value: string, fallback: string): string {
 	return sanitized.length > 0 ? sanitized : fallback;
 }
 
+export function sanitizeMCPServerName(serverName: string): string {
+	return sanitizeMCPToolNamePart(serverName, "server");
+}
+
 export function createMCPToolName(serverName: string, toolName: string): string {
-	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
+	const sanitizedServerName = sanitizeMCPServerName(serverName);
 	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");
 
 	// Strip redundant server name prefix from tool name if present
@@ -248,7 +252,7 @@ export function createMCPToolName(serverName: string, toolName: string): string 
 }
 
 export function createMCPServerToolName(serverName: string): string {
-	return `mcp__${sanitizeMCPToolNamePart(serverName, "server")}`;
+	return `mcp__server__${sanitizeMCPServerName(serverName)}`;
 }
 
 /**

@@ -366,11 +366,11 @@ function collectPendingMCPToolNames(
 	return [...names];
 }
 
-function collectMCPServerNames(toolNames: readonly string[]): string[] {
+function collectMCPServerNames(mcpManager: MCPManager, toolNames: readonly string[]): string[] {
 	const serverNames = new Set<string>();
 	for (const name of toolNames) {
-		const parsed = parseMCPToolName(name);
-		if (parsed?.serverName) serverNames.add(parsed.serverName);
+		const serverName = mcpManager.resolveServerNameFromToolName(name);
+		if (serverName) serverNames.add(serverName);
 	}
 	return [...serverNames];
 }
@@ -379,15 +379,25 @@ function startLazyMCPConnectionsForToolNames(
 	mcpManager: MCPManager,
 	session: AgentSession,
 	toolNames: readonly string[],
+	enqueueMCPUpdate: (update: () => Promise<void>) => Promise<void>,
 ): void {
-	for (const serverName of collectMCPServerNames(toolNames)) {
-		if (mcpManager.getConnection(serverName) || !mcpManager.getServerConfig(serverName)) continue;
+	for (const serverName of collectMCPServerNames(mcpManager, toolNames)) {
+		if (!mcpManager.getServerConfig(serverName)) continue;
+		const requestedToolNamesForServer = toolNames.filter(
+			name => mcpManager.resolveServerNameFromToolName(name) === serverName,
+		);
 		void mcpManager
 			.connectServerOnDemand(serverName)
-			.then(async () => {
-				if (session.isDisposed) return;
-				await session.refreshMCPTools(mcpManager.getTools());
-			})
+			.then(() =>
+				enqueueMCPUpdate(async () => {
+					if (session.isDisposed) return;
+					await session.refreshMCPTools(mcpManager.getTools());
+					if (session.isDisposed) return;
+					if (requestedToolNamesForServer.length > 0) {
+						await session.activateDiscoveredMCPTools(requestedToolNamesForServer);
+					}
+				}),
+			)
 			.catch(error => {
 				logger.warn("Lazy MCP connection failed", {
 					path: `mcp:${serverName}`,
@@ -1746,12 +1756,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 				if (lazyMCPDiscovery) {
 					const lazyManager = mcpManager;
-					const mcpResult = await logger.time("discoverDeferredMCPTools", () =>
-						lazyManager.discoverDeferred(mcpDiscoverOptions),
-					);
-					applyMCPEnvironment(mcpResult);
-					logMCPLoadErrors(mcpResult.errors);
-					customTools.push(...mcpResult.tools);
+					try {
+						const mcpResult = await logger.time("discoverDeferredMCPTools", () =>
+							lazyManager.discoverDeferred(mcpDiscoverOptions),
+						);
+						applyMCPEnvironment(mcpResult);
+						logMCPLoadErrors(mcpResult.errors);
+						customTools.push(...mcpResult.tools);
+					} catch (error) {
+						logger.error("MCP tool load failed", {
+							path: ".mcp.json",
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
 				} else {
 					const deferredMCPManager = mcpManager;
 					startDeferredMCPDiscovery = (liveSession, activation) => {
@@ -1840,12 +1857,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						mcpManager.setNotificationsEnabled(true);
 					}
 					const lazyManager = mcpManager;
-					const mcpResult = await logger.time("discoverDeferredMCPTools", () =>
-						lazyManager.discoverDeferred(mcpDiscoverOptions),
-					);
-					applyMCPEnvironment(mcpResult);
-					logMCPLoadErrors(mcpResult.errors);
-					customTools.push(...mcpResult.tools);
+					try {
+						const mcpResult = await logger.time("discoverDeferredMCPTools", () =>
+							lazyManager.discoverDeferred(mcpDiscoverOptions),
+						);
+						applyMCPEnvironment(mcpResult);
+						logMCPLoadErrors(mcpResult.errors);
+						customTools.push(...mcpResult.tools);
+					} catch (error) {
+						logger.error("MCP tool load failed", {
+							path: ".mcp.json",
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
 				} else {
 					const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
 						...mcpDiscoverOptions,
@@ -3131,28 +3155,34 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		// Wire MCP manager callbacks to session for reactive tool updates.
 		// Skip when reusing a parent's manager — the parent owns the callbacks.
+		let mcpToolUpdateTail: Promise<void> = Promise.resolve();
+		const enqueueMCPUpdate = (update: () => Promise<void>): Promise<void> => {
+			const queued = mcpToolUpdateTail.then(update);
+			mcpToolUpdateTail = queued.catch(() => {});
+			return queued;
+		};
 		if (mcpManager && !options.mcpManager) {
 			mcpManager.setOnToolsChanged(tools => {
-				void (async () => {
-					try {
-						await session.refreshMCPTools(
-							tools,
-							deferMCPDiscoveryForUI && !mcpDiscoveryEnabled && options.toolNames === undefined
-								? { activateAll: true }
-								: undefined,
-						);
-						if (deferMCPDiscoveryForUI && !mcpDiscoveryEnabled && explicitlyRequestedMCPToolNames.length > 0) {
-							await session.setActiveToolsByName([
-								...session.getActiveToolNames(),
-								...explicitlyRequestedMCPToolNames,
-							]);
-						}
-					} catch (error) {
-						logger.warn("MCP tool refresh failed", {
-							error: error instanceof Error ? error.message : String(error),
-						});
+				void enqueueMCPUpdate(async () => {
+					if (session.isDisposed) return;
+					await session.refreshMCPTools(
+						tools,
+						deferMCPDiscoveryForUI && !mcpDiscoveryEnabled && options.toolNames === undefined
+							? { activateAll: true }
+							: undefined,
+					);
+					if (session.isDisposed) return;
+					if (deferMCPDiscoveryForUI && !mcpDiscoveryEnabled && explicitlyRequestedMCPToolNames.length > 0) {
+						await session.setActiveToolsByName([
+							...session.getActiveToolNames(),
+							...explicitlyRequestedMCPToolNames,
+						]);
 					}
-				})();
+				}).catch(error => {
+					logger.warn("MCP tool refresh failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
 			});
 			// Wire prompt refresh → rebuild MCP prompt slash commands
 			mcpManager.setOnPromptsChanged(serverName => {
@@ -3190,7 +3220,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				existingSession.selectedMCPToolNames,
 			);
 			if (requestedOrRestoredMCPToolNames.length > 0) {
-				startLazyMCPConnectionsForToolNames(mcpManager, session, requestedOrRestoredMCPToolNames);
+				startLazyMCPConnectionsForToolNames(mcpManager, session, requestedOrRestoredMCPToolNames, enqueueMCPUpdate);
 			}
 		}
 

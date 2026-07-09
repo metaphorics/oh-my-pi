@@ -145,6 +145,10 @@
               "enum": ["stdio"],
               "description": "Default transport when omitted."
             },
+            "description": {
+              "type": "string",
+              "description": "Human-readable server description shown in lazy discovery summaries."
+            },
             "command": {
               "type": "string",
               "minLength": 1,
@@ -187,6 +191,10 @@
               "enum": ["http"],
               "description": "Streamable HTTP transport."
             },
+            "description": {
+              "type": "string",
+              "description": "Human-readable server description shown in lazy discovery summaries."
+            },
             "url": {
               "type": "string",
               "minLength": 1,
@@ -217,6 +225,10 @@
               "type": "string",
               "enum": ["sse"],
               "description": "Legacy SSE transport kept for compatibility. Prefer http for new configs."
+            },
+            "description": {
+              "type": "string",
+              "description": "Human-readable server description shown in lazy discovery summaries."
             },
             "url": {
               "type": "string",

@@ -36,7 +36,7 @@ import {
 import { type MCPStoredOAuthCredential, refreshMCPOAuthToken } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import type { MCPToolDetails } from "./tool-bridge";
-import { createMCPServerToolName, DeferredMCPTool, MCPTool } from "./tool-bridge";
+import { createMCPServerToolName, DeferredMCPTool, MCPTool, sanitizeMCPServerName } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import type {
 	MCPGetPromptResult,
@@ -111,6 +111,25 @@ function trackPromise<T>(promise: Promise<T>): TrackedPromise<T> {
 
 function delay(ms: number): Promise<void> {
 	return Bun.sleep(ms);
+}
+
+function abortReason(signal: AbortSignal): unknown {
+	return signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw abortReason(signal);
+}
+
+function waitForAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise;
+	throwIfAborted(signal);
+	const aborted = Promise.withResolvers<never>();
+	const onAbort = (): void => aborted.reject(abortReason(signal));
+	signal.addEventListener("abort", onAbort, { once: true });
+	return Promise.race([promise, aborted.promise]).finally(() => {
+		signal.removeEventListener("abort", onAbort);
+	});
 }
 
 /**
@@ -422,44 +441,8 @@ export class MCPManager {
 		};
 	}
 
-	async connectServerOnDemand(name: string): Promise<void> {
-		if (this.#connections.has(name)) return;
-		const pending = this.#pendingOnDemandConnections.get(name);
-		if (pending) return pending;
-		const pendingConnection = this.#pendingConnections.get(name);
-		if (pendingConnection) {
-			const pendingReady = this.#pendingToolLoads.get(name) ?? pendingConnection;
-			const attempt = pendingReady
-				.then(
-					() => {
-						this.#serverErrors.delete(name);
-					},
-					error => {
-						const message = error instanceof Error ? error.message : String(error);
-						this.#serverErrors.set(name, message);
-						throw error;
-					},
-				)
-				.finally(() => {
-					this.#pendingOnDemandConnections.delete(name);
-				});
-			this.#pendingOnDemandConnections.set(name, attempt);
-			return attempt;
-		}
-		const config = this.#serverConfigs.get(name);
-		if (!config) throw new Error(`MCP server not configured: ${name}`);
-		const validationErrors = validateServerConfig(name, config);
-		if (validationErrors.length > 0) {
-			const message = validationErrors.join("; ");
-			this.#serverErrors.set(name, message);
-			throw new Error(message);
-		}
-
-		const source = this.#sources.get(name);
-		const connectEpoch = this.#epoch;
-		const connectionPromise = this.#connectAndWireServer(name, config, source, connectEpoch);
-		this.#pendingConnections.set(name, connectionPromise);
-		const attempt = connectionPromise
+	#trackOnDemandReady(name: string, ready: Promise<unknown>): Promise<void> {
+		const attempt = ready
 			.then(
 				() => {
 					this.#serverErrors.delete(name);
@@ -471,11 +454,43 @@ export class MCPManager {
 				},
 			)
 			.finally(() => {
-				if (this.#pendingConnections.get(name) === connectionPromise) this.#pendingConnections.delete(name);
 				this.#pendingOnDemandConnections.delete(name);
 			});
 		this.#pendingOnDemandConnections.set(name, attempt);
 		return attempt;
+	}
+
+	async connectServerOnDemand(name: string, signal?: AbortSignal): Promise<void> {
+		throwIfAborted(signal);
+		const pending = this.#pendingOnDemandConnections.get(name);
+		if (pending) return waitForAbort(pending, signal);
+		const pendingToolLoad = this.#pendingToolLoads.get(name);
+		if (pendingToolLoad) return waitForAbort(this.#trackOnDemandReady(name, pendingToolLoad), signal);
+		if (this.#connections.has(name)) return;
+		const pendingConnection = this.#pendingConnections.get(name);
+		if (pendingConnection) {
+			const pendingReady = this.#pendingToolLoads.get(name) ?? pendingConnection;
+			return waitForAbort(this.#trackOnDemandReady(name, pendingReady), signal);
+		}
+		const config = this.#serverConfigs.get(name);
+		if (!config) throw new Error(`MCP server not configured: ${name}`);
+		const validationErrors = validateServerConfig(name, config);
+		if (validationErrors.length > 0) {
+			const message = validationErrors.join("; ");
+			this.#serverErrors.set(name, message);
+			throw new Error(message);
+		}
+		const source = this.#sources.get(name);
+		const connectEpoch = this.#epoch;
+		const connectionPromise = this.#connectAndWireServer(name, config, source, connectEpoch);
+		this.#pendingConnections.set(name, connectionPromise);
+		const attempt = this.#trackOnDemandReady(name, connectionPromise);
+		return waitForAbort(
+			attempt.finally(() => {
+				if (this.#pendingConnections.get(name) === connectionPromise) this.#pendingConnections.delete(name);
+			}),
+			signal,
+		);
 	}
 
 	getDeferredDiscoverableTools(): DiscoverableTool[] {
@@ -648,8 +663,17 @@ export class MCPManager {
 			this.#pendingConnections.set(name, connectionPromise);
 
 			const toolsPromise = connectionPromise.then(async connection => {
-				const serverTools = await listTools(connection);
-				return { connection, serverTools };
+				try {
+					const serverTools = await listTools(connection);
+					return { connection, serverTools };
+				} catch (error) {
+					if (this.#connections.get(name) === connection) {
+						connection.transport.onClose = undefined;
+						await connection.transport.close().catch(() => {});
+						if (this.#connections.get(name) === connection) this.#connections.delete(name);
+					}
+					throw error;
+				}
 			});
 			this.#pendingToolLoads.set(name, toolsPromise);
 
@@ -865,6 +889,23 @@ export class MCPManager {
 	 */
 	getSource(name: string): SourceMeta | undefined {
 		return this.#sources.get(name) ?? this.#connections.get(name)?._source;
+	}
+
+	/** Resolve a normalized MCP tool name to the raw configured server name. */
+	resolveServerNameFromToolName(toolName: string): string | undefined {
+		if (!toolName.startsWith("mcp__")) return undefined;
+		const rest = toolName.slice("mcp__".length);
+		let bestName: string | undefined;
+		let bestLength = -1;
+		const candidateNames = new Set([...this.#serverConfigs.keys(), ...this.#connections.keys()]);
+		for (const name of candidateNames) {
+			const sanitized = sanitizeMCPServerName(name);
+			if (rest !== sanitized && !rest.startsWith(`${sanitized}_`)) continue;
+			if (sanitized.length <= bestLength) continue;
+			bestName = name;
+			bestLength = sanitized.length;
+		}
+		return bestName;
 	}
 
 	/**
