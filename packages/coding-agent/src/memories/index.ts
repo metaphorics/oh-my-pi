@@ -229,7 +229,7 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	// large cross-project bank cannot starve project-specific lessons. Clamp to 0:
 	// a truncated summary can exceed its nominal budget once the marker is added.
 	const learnedBudget = Math.max(0, cfg.summaryInjectionTokenLimit - Math.ceil(summaryOut.length / 4));
-	const hasGlobalLearned = snapshot.globalLearned.length > 0;
+	const hasGlobalLearned = isGlobalMemoryBankEnabled(settings) && snapshot.globalLearned.length > 0;
 	const hasProjectLearned = snapshot.learned.length > 0;
 	const projectLearnedBudget = hasGlobalLearned && hasProjectLearned ? Math.ceil(learnedBudget / 2) : learnedBudget;
 	const globalLearnedBudget =

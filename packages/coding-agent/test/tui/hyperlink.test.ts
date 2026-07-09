@@ -1,9 +1,13 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { getGlobalMemoryRoot, getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	fileHyperlink,
 	isHyperlinkEnabled,
@@ -13,6 +17,7 @@ import {
 	urlHyperlinkAlways,
 } from "@oh-my-pi/pi-coding-agent/tui/hyperlink";
 import * as terminalCaps from "@oh-my-pi/pi-tui";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 // OSC 8 sequence markers
 const OSC = "\x1b]";
@@ -310,5 +315,47 @@ describe("tryResolveInternalUrlSync", () => {
 	it("swallows errors from malformed URLs", () => {
 		// Malformed input should not throw, just return undefined.
 		expect(tryResolveInternalUrlSync("local://%ZZ")).toBeUndefined();
+	});
+
+	it("routes memory://global previews to the global bank root", async () => {
+		const cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "hyperlink-memory-global-"));
+		const agentDir = path.join(cleanupRoot, "agent");
+		const projectCwd = path.join(cleanupRoot, "project");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.mkdir(projectCwd, { recursive: true });
+
+		const previousAgentDir = getAgentDir();
+		try {
+			setAgentDir(agentDir);
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true, agentDir, cwd: projectCwd });
+
+			AgentRegistry.global().register({
+				id: "test-main",
+				displayName: "test",
+				kind: "main",
+				session: {
+					sessionManager: {
+						getCwd: () => projectCwd,
+						getArtifactsDir: () => null,
+						getSessionId: () => "test",
+					},
+				} as unknown as AgentSession,
+				sessionFile: null,
+			});
+
+			const globalLearned = path.join(getGlobalMemoryRoot(agentDir), "learned.md");
+			const projectLearned = path.join(getMemoryRoot(agentDir, projectCwd), "learned.md");
+			expect(globalLearned).not.toBe(projectLearned);
+			expect(tryResolveInternalUrlSync("memory://global")).toBe(globalLearned);
+			expect(tryResolveInternalUrlSync("memory://global")).not.toBe(projectLearned);
+		} finally {
+			setAgentDir(previousAgentDir);
+			AgentRegistry.resetGlobalForTests();
+			LocalProtocolHandler.resetOverrideForTests();
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true });
+			await removeWithRetries(cleanupRoot);
+		}
 	});
 });

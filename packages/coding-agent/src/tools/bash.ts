@@ -745,6 +745,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				getArtifactsDir: this.session.getArtifactsDir,
 				getSessionId: this.session.getSessionId,
 			},
+			settings: this.session.settings,
 		};
 		command = await expandInternalUrls(command, { ...internalUrlOptions, ensureLocalParentDirs: true });
 		const resolvedEnv = env

@@ -281,6 +281,36 @@ describe("expandInternalUrls", () => {
 		await expect(expandInternalUrls(command, { skills: [], internalRouter: router })).resolves.toBe(command);
 	});
 
+	it("forwards session settings into the internal router resolve context", async () => {
+		const settingsContext = { id: "session-settings" };
+		let receivedSettings: unknown;
+		const internalRouter = {
+			canHandle: (input: string) => input.startsWith("memory://"),
+			resolve: async (input: string, context?: { settings?: unknown }) => {
+				if (context?.settings !== settingsContext) {
+					throw new Error("missing session settings");
+				}
+				receivedSettings = context?.settings;
+				return {
+					url: input,
+					content: "",
+					contentType: "text/plain" as const,
+					sourcePath: "/tmp/memories/global/learned.md",
+					immutable: true,
+				};
+			},
+		};
+
+		await expect(
+			expandInternalUrls("cat memory://global", {
+				skills: [],
+				internalRouter,
+				settings: settingsContext,
+			}),
+		).resolves.toBe(`cat ${shellEscape("/tmp/memories/global/learned.md")}`);
+		expect(receivedSettings).toBe(settingsContext);
+	});
+
 	it("does not match local:/ inside filesystem paths (e.g. /repo/local:/PLAN.md)", async () => {
 		const command = "cat /repo/local:/PLAN.md";
 		await expect(expandInternalUrls(command, { skills: [] })).resolves.toBe(command);

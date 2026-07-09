@@ -250,6 +250,27 @@ describe("learned-lesson read-back", () => {
 		expect(projectIndex).toBeGreaterThan(globalIndex);
 	});
 
+	it("does not inject cached global lessons after the global bank is disabled", async () => {
+		const enabled = Settings.isolated({ "memory.backend": "local", "memory.globalBank": true });
+		await saveGlobalLearnedLesson(agentDir, { content: "Stale global baseline" });
+		await saveLearnedLesson(agentDir, enabled.getCwd(), { content: "Project lesson stays" });
+
+		const both = await buildMemoryToolDeveloperInstructions(agentDir, enabled);
+		expect(both).toContain("Stale global baseline");
+		expect(both).toContain("Project lesson stays");
+		expect(both).toContain("memory://global");
+
+		const session = sessionWithFile("session-global-disable.jsonl");
+		const disabled = Settings.isolated({ "memory.backend": "local", "memory.globalBank": false });
+		spyOn(disabled, "getCwd").mockReturnValue(enabled.getCwd());
+		await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(session, agentDir, disabled);
+
+		const out = await buildMemoryToolDeveloperInstructions(agentDir, disabled, session);
+		expect(out).toContain("Project lesson stays");
+		expect(out).not.toContain("Stale global baseline");
+		expect(out).not.toContain("memory://global");
+	});
+
 	it("reserves learned-lesson budget for project lessons when the global bank is large", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "local",

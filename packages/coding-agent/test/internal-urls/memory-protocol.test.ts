@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -92,6 +92,26 @@ describe("MemoryProtocolHandler", () => {
 			expect(resource.content).toBe("- global lesson\n");
 			expect(resource.contentType).toBe("text/markdown");
 			expect(resource.sourcePath).toBe(path.join(globalRoot, "learned.md"));
+		});
+	});
+
+	it("resolves memory://global using the settings-scoped agentDir", async () => {
+		await withMemoryFixture(async ({ agentDir, cleanupRoot }) => {
+			const sessionAgentDir = path.join(cleanupRoot, "session-agent");
+			await fs.mkdir(sessionAgentDir, { recursive: true });
+			const sessionGlobalRoot = getGlobalMemoryRoot(sessionAgentDir);
+			await fs.mkdir(sessionGlobalRoot, { recursive: true });
+			await Bun.write(path.join(sessionGlobalRoot, "learned.md"), "- session global lesson\n");
+
+			const router = InternalUrlRouter.instance();
+			const settings = Settings.isolated({ "memory.backend": "local", "memory.globalBank": true });
+			spyOn(settings, "getAgentDir").mockReturnValue(sessionAgentDir);
+
+			const resource = await router.resolve("memory://global", { settings });
+
+			expect(resource.content).toBe("- session global lesson\n");
+			expect(resource.sourcePath).toBe(path.join(sessionGlobalRoot, "learned.md"));
+			expect(resource.sourcePath).not.toBe(path.join(getGlobalMemoryRoot(agentDir), "learned.md"));
 		});
 	});
 

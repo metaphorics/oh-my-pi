@@ -11,7 +11,7 @@ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, Ur
 const DEFAULT_MEMORY_FILE = "memory_summary.md";
 const DEFAULT_GLOBAL_MEMORY_FILE = "learned.md";
 const MEMORY_NAMESPACE = "root";
-const GLOBAL_MEMORY_NAMESPACE = "global";
+export const GLOBAL_MEMORY_NAMESPACE = "global";
 
 /**
  * Snapshot of memory roots for every registered session, deduped.
@@ -43,6 +43,7 @@ function toMemoryValidationError(error: unknown): Error {
 
 interface SettingsReader {
 	get(key: string): unknown;
+	getAgentDir?: () => string;
 }
 
 function hasSettingsReader(value: unknown): value is SettingsReader {
@@ -56,6 +57,16 @@ function isGlobalMemoryEnabledForContext(context: ResolveContext | undefined): b
 		return settings.get("memory.backend") === "local" && settings.get("memory.globalBank") === true;
 	} catch {
 		return false;
+	}
+}
+
+function getAgentDirFromContext(context: ResolveContext | undefined): string | undefined {
+	const settings = context?.settings;
+	if (!hasSettingsReader(settings) || typeof settings.getAgentDir !== "function") return undefined;
+	try {
+		return settings.getAgentDir();
+	} catch {
+		return undefined;
 	}
 }
 
@@ -242,7 +253,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 					'memory://global requires local memory with memory.globalBank enabled for this session. Set memory.backend to "local" and enable memory.globalBank first.',
 				);
 			}
-			const root = getGlobalMemoryRoot(getAgentDir());
+			const root = getGlobalMemoryRoot(getAgentDirFromContext(context) ?? getAgentDir());
 			try {
 				await fs.stat(root);
 			} catch (error) {

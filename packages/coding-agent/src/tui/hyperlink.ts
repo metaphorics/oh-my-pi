@@ -7,14 +7,17 @@
  */
 import * as url from "node:url";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../config/settings";
 import {
+	GLOBAL_MEMORY_NAMESPACE,
 	LocalProtocolHandler,
 	memoryRootsFromRegistry,
 	parseInternalUrl,
 	resolveLocalUrlToPath,
 	resolveMemoryUrlToPath,
 } from "../internal-urls";
+import { getGlobalMemoryRoot } from "../memories";
 
 const OSC = "\x1b]";
 const ST = "\x1b\\";
@@ -161,6 +164,11 @@ export function tryResolveInternalUrlSync(input: string): string | undefined {
 		}
 		if (input.startsWith("memory://")) {
 			const url = parseInternalUrl(input);
+			const namespace = url.rawHost || url.hostname;
+			if (namespace === GLOBAL_MEMORY_NAMESPACE) {
+				const agentDir = isSettingsInitialized() ? settings.getAgentDir() : getAgentDir();
+				return resolveMemoryUrlToPath(url, getGlobalMemoryRoot(agentDir));
+			}
 			const roots = memoryRootsFromRegistry();
 			for (const root of roots) {
 				try {
