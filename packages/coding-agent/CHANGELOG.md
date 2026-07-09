@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- xAI web search now uses `grok-4.5` instead of `grok-4.3`.
+
+### Fixed
+
+- Built-in provider model discovery now refreshes expired OAuth tokens instead of silently skipping the provider.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added
