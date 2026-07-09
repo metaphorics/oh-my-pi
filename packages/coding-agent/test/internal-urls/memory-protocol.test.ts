@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getGlobalMemoryRoot, getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import {
@@ -85,11 +86,27 @@ describe("MemoryProtocolHandler", () => {
 			await Bun.write(path.join(globalRoot, "learned.md"), "- global lesson\n");
 
 			const router = InternalUrlRouter.instance();
-			const resource = await router.resolve("memory://global");
+			const settings = Settings.isolated({ "memory.backend": "local", "memory.globalBank": true });
+			const resource = await router.resolve("memory://global", { settings });
 
 			expect(resource.content).toBe("- global lesson\n");
 			expect(resource.contentType).toBe("text/markdown");
 			expect(resource.sourcePath).toBe(path.join(globalRoot, "learned.md"));
+		});
+	});
+
+	it("requires local memory settings with the global bank enabled for memory://global", async () => {
+		await withMemoryFixture(async ({ agentDir }) => {
+			const globalRoot = getGlobalMemoryRoot(agentDir);
+			await fs.mkdir(globalRoot, { recursive: true });
+			await Bun.write(path.join(globalRoot, "learned.md"), "- global lesson\n");
+			const router = InternalUrlRouter.instance();
+			const disabled = Settings.isolated({ "memory.backend": "local", "memory.globalBank": false });
+
+			await expect(router.resolve("memory://global")).rejects.toThrow("memory://global requires local memory");
+			await expect(router.resolve("memory://global", { settings: disabled })).rejects.toThrow(
+				"memory.globalBank enabled",
+			);
 		});
 	});
 

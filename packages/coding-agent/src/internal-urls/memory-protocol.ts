@@ -6,7 +6,7 @@ import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessio
 import { AgentRegistry } from "../registry/agent-registry";
 import { buildDirectoryResource } from "./filesystem-resource";
 import { validateRelativePath } from "./skill-protocol";
-import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 const DEFAULT_MEMORY_FILE = "memory_summary.md";
 const DEFAULT_GLOBAL_MEMORY_FILE = "learned.md";
@@ -39,6 +39,24 @@ function ensureWithinRoot(targetPath: string, rootPath: string): void {
 function toMemoryValidationError(error: unknown): Error {
 	const message = error instanceof Error ? error.message : String(error);
 	return new Error(message.replace("skill://", "memory://"));
+}
+
+interface SettingsReader {
+	get(key: string): unknown;
+}
+
+function hasSettingsReader(value: unknown): value is SettingsReader {
+	return value !== null && typeof value === "object" && "get" in value && typeof value.get === "function";
+}
+
+function isGlobalMemoryEnabledForContext(context: ResolveContext | undefined): boolean {
+	const settings = context?.settings;
+	if (!hasSettingsReader(settings)) return false;
+	try {
+		return settings.get("memory.backend") === "local" && settings.get("memory.globalBank") === true;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -212,13 +230,18 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "memory";
 	readonly immutable = true;
 
-	async resolve(url: InternalUrl): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const namespace = url.rawHost || url.hostname;
 		if (!namespace) {
 			throw new Error("memory:// URL requires a namespace: memory://root, memory://global, or memory://<memory-id>");
 		}
 
 		if (namespace === GLOBAL_MEMORY_NAMESPACE) {
+			if (!isGlobalMemoryEnabledForContext(context)) {
+				throw new Error(
+					'memory://global requires local memory with memory.globalBank enabled for this session. Set memory.backend to "local" and enable memory.globalBank first.',
+				);
+			}
 			const root = getGlobalMemoryRoot(getAgentDir());
 			try {
 				await fs.stat(root);

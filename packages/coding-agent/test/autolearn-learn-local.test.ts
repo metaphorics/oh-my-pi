@@ -250,6 +250,23 @@ describe("learned-lesson read-back", () => {
 		expect(projectIndex).toBeGreaterThan(globalIndex);
 	});
 
+	it("reserves learned-lesson budget for project lessons when the global bank is large", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "local",
+			"memory.globalBank": true,
+			"memories.summaryInjectionTokenLimit": 120,
+		});
+		const globalRoot = getGlobalMemoryRoot(agentDir);
+		await fs.mkdir(globalRoot, { recursive: true });
+		await Bun.write(path.join(globalRoot, "learned.md"), `- ${"global baseline ".repeat(500)}\n`);
+		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "PROJECT_MARKER" });
+
+		const out = await buildMemoryToolDeveloperInstructions(agentDir, settings);
+
+		expect(out).toContain("global baseline");
+		expect(out).toContain("PROJECT_MARKER");
+	});
+
 	it("returns undefined when the memory backend is off", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "Present but gated" });
