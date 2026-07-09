@@ -88,6 +88,7 @@ export type RpcSkillCommandResult = { agentInvoked: true };
 export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	text: string,
+	streamingBehavior: "steer" | "followUp" = "steer",
 ): Promise<RpcSkillCommandResult | false> {
 	if (!session.skillsSettings?.enableSkillCommands) return false;
 	const parsed = parseSkillInvocation(text);
@@ -103,7 +104,7 @@ export async function tryRunRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior: "steer" },
+		{ streamingBehavior },
 	);
 	return { agentInvoked: true };
 }
@@ -845,7 +846,7 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
-				const skillResult = await tryRunRpcSkillCommand(session, command.message);
+				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
 				}
