@@ -1624,6 +1624,89 @@ describe("ModelRegistry", () => {
 				}
 			}
 		});
+
+		test("refreshProvider for targeted built-in provider does not refresh unrelated expired OAuth credentials", async () => {
+			const originalXaiOAuthToken = Bun.env.XAI_OAUTH_TOKEN;
+			const originalXaiApiKey = Bun.env.XAI_API_KEY;
+			delete Bun.env.XAI_OAUTH_TOKEN;
+			delete Bun.env.XAI_API_KEY;
+
+			try {
+				await authStorage.set("xai-oauth", [
+					{
+						type: "oauth",
+						access: "stale-xai-access",
+						refresh: "r-xai",
+						expires: Date.now() - 60_000,
+					},
+				]);
+
+				await authStorage.set("openai-codex", [
+					{
+						type: "oauth",
+						access: "stale-codex-access",
+						refresh: "r-codex",
+						expires: Date.now() - 60_000,
+					},
+				]);
+
+				const captured: { authHeader: string | null } = { authHeader: null };
+				const fetchMock: FetchImpl = async (input, init) => {
+					const url = input instanceof Request ? input.url : String(input);
+					if (url === "https://api.x.ai/v1/models") {
+						captured.authHeader =
+							input instanceof Request
+								? input.headers.get("Authorization")
+								: new Headers(init?.headers).get("Authorization");
+						return new Response(
+							JSON.stringify({
+								data: [{ id: "grok-4.5" }],
+							}),
+							{ status: 200, headers: { "Content-Type": "application/json" } },
+						);
+					}
+					throw new Error(`Unexpected URL: ${url}`);
+				};
+
+				const refreshedProviders: string[] = [];
+				const spy = spyOn(authStorage, "getApiKey").mockImplementation(async providerId => {
+					refreshedProviders.push(providerId);
+					if (providerId === "xai-oauth") {
+						await authStorage.set("xai-oauth", [
+							{
+								type: "oauth",
+								access: "fresh-xai-access",
+								refresh: "r-xai",
+								expires: Date.now() + 3_600_000,
+							},
+						]);
+						return "fresh-xai-access";
+					}
+					return undefined;
+				});
+
+				try {
+					const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+					await registry.refreshProvider("xai-oauth", "online");
+
+					expect(refreshedProviders).toEqual(["xai-oauth"]);
+					expect(captured.authHeader).toBe("Bearer fresh-xai-access");
+				} finally {
+					spy.mockRestore();
+				}
+			} finally {
+				if (originalXaiOAuthToken === undefined) {
+					delete Bun.env.XAI_OAUTH_TOKEN;
+				} else {
+					Bun.env.XAI_OAUTH_TOKEN = originalXaiOAuthToken;
+				}
+				if (originalXaiApiKey === undefined) {
+					delete Bun.env.XAI_API_KEY;
+				} else {
+					Bun.env.XAI_API_KEY = originalXaiApiKey;
+				}
+			}
+		});
 	});
 
 	describe("disabled provider filtering", () => {

@@ -1560,7 +1560,9 @@ export class ModelRegistry {
 	): Promise<BuiltInDiscoveryResult> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
-		const managerOptions = (await this.#collectBuiltInModelManagerOptions()).filter(opts => {
+		const managerOptions = (
+			await this.#collectBuiltInModelManagerOptions(configuredDiscoveryProviders, providerFilter)
+		).filter(opts => {
 			if (configuredDiscoveryProviders.has(opts.providerId)) {
 				return false;
 			}
@@ -1583,7 +1585,10 @@ export class ModelRegistry {
 		return { models, authoritativeProviders };
 	}
 
-	async #collectBuiltInModelManagerOptions(): Promise<ModelManagerOptions<Api>[]> {
+	async #collectBuiltInModelManagerOptions(
+		configuredDiscoveryProviders?: ReadonlySet<string>,
+		providerFilter?: ReadonlySet<string>,
+	): Promise<ModelManagerOptions<Api>[]> {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
 			resolveKey: (value: string | undefined) => string | undefined;
@@ -1622,12 +1627,30 @@ export class ModelRegistry {
 			},
 		];
 		const disabledProviders = getDisabledProviderIdsFromSettings();
-		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
-			descriptor => !disabledProviders.has(descriptor.providerId),
-		);
-		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(
-			descriptor => !disabledProviders.has(descriptor.providerId),
-		);
+		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(descriptor => {
+			if (disabledProviders.has(descriptor.providerId)) {
+				return false;
+			}
+			if (configuredDiscoveryProviders?.has(descriptor.providerId)) {
+				return false;
+			}
+			if (providerFilter && !providerFilter.has(descriptor.providerId)) {
+				return false;
+			}
+			return true;
+		});
+		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor => {
+			if (disabledProviders.has(descriptor.providerId)) {
+				return false;
+			}
+			if (configuredDiscoveryProviders?.has(descriptor.providerId)) {
+				return false;
+			}
+			if (providerFilter && !providerFilter.has(descriptor.providerId)) {
+				return false;
+			}
+			return true;
+		});
 		// Peek first to avoid OAuth refresh churn during discovery. When peek
 		// fails but a stored OAuth credential exists, the access token has
 		// expired: refresh once through getApiKeyForProvider (persists the
