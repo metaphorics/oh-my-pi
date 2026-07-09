@@ -69,7 +69,7 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import { type GuidedGoalMessage, runGuidedGoalTurn } from "../goals/guided-setup";
+import { type GuidedGoalMessage, buildGuidedGoalContextPrompt, runGuidedGoalTurn } from "../goals/guided-setup";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
@@ -2936,10 +2936,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				: (await this.showHookEditor("Guided goal", undefined, undefined, { promptStyle: true }))?.trim();
 			if (!initial) return;
 
+			const contextPrompt = await buildGuidedGoalContextPrompt(this.sessionManager.getCwd());
 			const messages: GuidedGoalMessage[] = [{ role: "user", content: initial }];
 			let latestDraftObjective: string | undefined;
 			for (let turn = 0; turn < 6; turn++) {
-				const result = await runGuidedGoalTurn(this.session, { messages });
+				const result = await runGuidedGoalTurn(this.session, { messages, contextPrompt });
 				if (result.objective?.trim()) latestDraftObjective = result.objective.trim();
 				if (result.kind === "question") {
 					messages.push({ role: "assistant", content: result.question });

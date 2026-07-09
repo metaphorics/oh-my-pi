@@ -5,7 +5,10 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { runGuidedGoalTurn } from "@oh-my-pi/pi-coding-agent/goals/guided-setup";
+import {
+	buildGuidedGoalContextPrompt,
+	runGuidedGoalTurn,
+} from "@oh-my-pi/pi-coding-agent/goals/guided-setup";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -239,6 +242,43 @@ describe("guided goal setup", () => {
 
 		// The objective is restored to the real secret before the goal starts.
 		expect(result).toEqual({ kind: "ready", objective: "Rotate the key SECRET123 and redeploy." });
+	});
+
+	it("buildGuidedGoalContextPrompt includes AGENTS.md content inside repository-context", async () => {
+		using temp = await TempDir.create("@guided-goal-context-");
+		const agentsPath = temp.join("AGENTS.md");
+		await Bun.write(agentsPath, "# Project rules\nUse Bun, never tsc.\n");
+
+		const rendered = await buildGuidedGoalContextPrompt(temp.path());
+		expect(rendered).toBeDefined();
+		expect(rendered).toContain("<repository-context>");
+		expect(rendered).toContain("Use Bun, never tsc.");
+		expect(rendered).toContain("AGENTS.md");
+	});
+
+	it("buildGuidedGoalContextPrompt does not invent project context for an empty cwd", async () => {
+		using temp = await TempDir.create("@guided-goal-empty-");
+		const rendered = await buildGuidedGoalContextPrompt(temp.path());
+		// User-level AGENTS.md may still surface via loadProjectContextFiles; the
+		// empty project itself must not contribute a fabricated project file.
+		if (rendered !== undefined) {
+			expect(rendered).not.toContain(temp.path());
+		}
+	});
+
+	it("includes contextPrompt in the system prompt array when provided", async () => {
+		const complete = spyOn(core, "instrumentedCompleteSimple").mockResolvedValue(
+			mockResponse({ kind: "question", question: "What is done?" }) as never,
+		);
+
+		await runGuidedGoalTurn(createSession(), {
+			messages: [{ role: "user", content: "Ship it" }],
+			contextPrompt: "<repository-context>stack=bun</repository-context>",
+		});
+
+		const sent = complete.mock.calls[0]?.[1] as { systemPrompt: string[] };
+		expect(sent.systemPrompt).toHaveLength(2);
+		expect(sent.systemPrompt[1]).toContain("stack=bun");
 	});
 
 	it("salvages the latest guided objective when the turn cap ends on a question without one", async () => {

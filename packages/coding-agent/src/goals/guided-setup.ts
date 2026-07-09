@@ -1,10 +1,12 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Tool } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
+import guidedGoalContextPrompt from "../prompts/goals/guided-goal-context.md" with { type: "text" };
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import guidedGoalSystemPrompt from "../prompts/goals/guided-goal-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { loadProjectContextFiles } from "../system-prompt";
 import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "../thinking";
 
 const RESPOND_TOOL_NAME = "respond";
@@ -37,6 +39,24 @@ export type GuidedGoalTurnResult =
 export interface GuidedGoalTurnOptions {
 	messages: readonly GuidedGoalMessage[];
 	signal?: AbortSignal;
+	/** Optional untrusted repository context block (context files only). */
+	contextPrompt?: string;
+}
+
+/**
+ * Build a read-only repository context block for the guided-goal interviewer
+ * from project context files (AGENTS.md and the like). Returns undefined when
+ * none are present or loading fails so the interview stays context-free.
+ */
+export async function buildGuidedGoalContextPrompt(cwd: string): Promise<string | undefined> {
+	try {
+		const contextFiles = await loadProjectContextFiles({ cwd });
+		if (contextFiles.length === 0) return undefined;
+		return prompt.render(guidedGoalContextPrompt, { contextFiles }).trim() || undefined;
+	} catch (err) {
+		logger.debug("guided-goal context load failed", { err: String(err) });
+		return undefined;
+	}
 }
 
 function parseGuidedGoalPayload(value: unknown): GuidedGoalTurnResult {
@@ -92,11 +112,18 @@ export async function runGuidedGoalTurn(
 	// never sent verbatim to the plan/slow provider. Deobfuscated again below before display/use.
 	const obfuscator = session.obfuscator;
 	const promptText = obfuscator?.hasSecrets() ? obfuscator.obfuscate(userPrompt) : userPrompt;
+	const systemBlocks = [prompt.render(guidedGoalSystemPrompt)];
+	if (options.contextPrompt) {
+		const contextBlock = obfuscator?.hasSecrets()
+			? obfuscator.obfuscate(options.contextPrompt)
+			: options.contextPrompt;
+		systemBlocks.push(contextBlock);
+	}
 	const thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel);
 	const response = await instrumentedCompleteSimple(
 		resolved.model,
 		{
-			systemPrompt: [prompt.render(guidedGoalSystemPrompt)],
+			systemPrompt: systemBlocks,
 			messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
 			tools: [RESPOND_TOOL],
 		},
