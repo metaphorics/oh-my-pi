@@ -34,6 +34,6 @@ export function createAssistantMessageComponent(
 		ctx.viewSession.extensionRunner?.getAssistantThinkingRenderers(),
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
-		() => ctx.settings.get("terminal.showImages"),
+		() => ctx.settings.get("terminal.showImages") !== false,
 	);
 }

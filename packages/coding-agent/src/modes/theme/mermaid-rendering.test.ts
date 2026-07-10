@@ -335,6 +335,43 @@ describe("Nomnoml SVG assistant rendering", () => {
 		expect(rendered).toContain("\x1b_G");
 	});
 
+	it("preserves non-PNG read images without converting or rendering them while images are off", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const budget = new RecordingImageBudget(10);
+		const imageUpdated = Promise.withResolvers<void>();
+		const onImageUpdate = vi.fn(() => imageUpdated.resolve());
+		let showImages = false;
+		const component = new AssistantMessageComponent(
+			createAssistantMessage("Read image"),
+			false,
+			onImageUpdate,
+			[],
+			budget,
+			true,
+			() => showImages,
+		);
+		component.setToolResultImages("read-jpeg", [{ type: "image", data: TINY_PNG, mimeType: "image/jpeg" }]);
+		await new Bun.Image(Buffer.from(TINY_PNG, "base64")).png().toBase64();
+		await Promise.resolve();
+		expect(onImageUpdate).not.toHaveBeenCalled();
+
+		const hidden = stripAnsi(component.render(120).join("\n"));
+		expect(hidden).toContain("Read image");
+		expect(hidden).not.toContain("[Image:");
+		expect(budget.keys).toEqual([]);
+
+		showImages = true;
+		component.refreshImagePolicy();
+		await imageUpdated.promise;
+		expect(onImageUpdate).toHaveBeenCalledTimes(1);
+		await Promise.resolve();
+		budget.beginPass();
+		const restored = component.render(120).join("\n");
+		budget.endPass();
+		expect(restored).toContain("\x1b_G");
+		expect(budget.keys.at(-1)).toMatch(/^assistant-tool:am\d+:read-jpeg:0$/);
+	});
+
 	it("turns images off for an existing live component on update", async () => {
 		setMarkdownNomnomlRendering("svg");
 		setTerminalImageProtocol(ImageProtocol.Kitty);
@@ -514,5 +551,123 @@ describe("Nomnoml SVG assistant rendering", () => {
 		expect(rendered).toContain("Nomnoml");
 		expect(rendered).toContain("diagram");
 		expect(rendered.split("\n").every(line => Bun.stringWidth(line) <= 10)).toBe(true);
+	});
+});
+
+describe("AssistantMessageComponent async disposal", () => {
+	it("does not resurrect a Nomnoml image after dispose while raster is pending", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+
+		const raster = Promise.withResolvers<string>();
+		spyOn(nomnomlCache, "resolveNomnomlPng").mockReturnValue(raster.promise);
+
+		const budget = new RecordingImageBudget(10);
+		const requestRender = vi.fn();
+		const ctx = createLiveContext(true, budget, requestRender);
+		const message = createAssistantMessage("```nomnoml\n[A] -> [B]\n```");
+		const component = createAssistantMessageComponent(ctx, message);
+
+		component.dispose();
+		const contentContainer = component.children[1];
+		if (!(contentContainer instanceof Container)) throw new Error("Expected content container");
+		const childrenAfterDispose = contentContainer.children.slice();
+		raster.resolve(TINY_PNG);
+		await raster.promise;
+		await Promise.resolve();
+
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(budget.keys).toEqual([]);
+		expect(contentContainer.children).toHaveLength(childrenAfterDispose.length);
+		expect(contentContainer.children.every((child, index) => child === childrenAfterDispose[index])).toBe(true);
+		expect(contentContainer.children.some(child => child instanceof Image)).toBe(false);
+	});
+
+	it("does not resurrect a Kitty tool image after dispose while conversion is pending", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+
+		const conversion = Promise.withResolvers<string>();
+		spyOn(Bun.Image.prototype, "toBase64").mockReturnValue(conversion.promise);
+
+		const budget = new RecordingImageBudget(10);
+		const requestRender = vi.fn();
+		const ctx = createLiveContext(true, budget, requestRender);
+		const message = createAssistantMessage("tool image");
+		const component = createAssistantMessageComponent(ctx, message);
+		component.setToolResultImages("read-1", [{ type: "image", data: TINY_PNG, mimeType: "image/jpeg" }]);
+
+		component.dispose();
+		const contentContainer = component.children[1];
+		if (!(contentContainer instanceof Container)) throw new Error("Expected content container");
+		const childrenAfterDispose = contentContainer.children.slice();
+		conversion.resolve(TINY_PNG);
+		await conversion.promise;
+		await Promise.resolve();
+
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(budget.keys).toEqual([]);
+		expect(contentContainer.children).toHaveLength(childrenAfterDispose.length);
+		expect(contentContainer.children.every((child, index) => child === childrenAfterDispose[index])).toBe(true);
+		expect(contentContainer.children.some(child => child instanceof Image)).toBe(false);
+	});
+
+	it("ignores updateContent after dispose", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+
+		const raster = Promise.withResolvers<string>();
+		const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockReturnValue(raster.promise);
+
+		const budget = new RecordingImageBudget(10);
+		const requestRender = vi.fn();
+		const ctx = createLiveContext(true, budget, requestRender);
+		const firstMessage = createAssistantMessage("```nomnoml\n[Old] -> [Old]\n```");
+		const component = createAssistantMessageComponent(ctx, firstMessage);
+
+		expect(rasterSpy).toHaveBeenCalledTimes(1);
+
+		component.dispose();
+		const contentContainer = component.children[1];
+		if (!(contentContainer instanceof Container)) throw new Error("Expected content container");
+		const childrenAfterDispose = contentContainer.children.slice();
+
+		const secondMessage = createAssistantMessage("```nomnoml\n[New] -> [New]\n```");
+		component.updateContent(secondMessage);
+
+		expect(rasterSpy).toHaveBeenCalledTimes(1);
+		expect(budget.keys).toEqual([]);
+		expect(contentContainer.children).toHaveLength(childrenAfterDispose.length);
+		expect(contentContainer.children.every((child, index) => child === childrenAfterDispose[index])).toBe(true);
+
+		raster.resolve(TINY_PNG);
+		await raster.promise;
+		await Promise.resolve();
+
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(budget.keys).toEqual([]);
+	});
+
+	it("ignores refreshImagePolicy after dispose", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+
+		const conversion = Promise.withResolvers<string>();
+		const toBase64Spy = spyOn(Bun.Image.prototype, "toBase64").mockReturnValue(conversion.promise);
+
+		const budget = new RecordingImageBudget(10);
+		const requestRender = vi.fn();
+		const ctx = createLiveContext(false, budget, requestRender);
+		const message = createAssistantMessage("tool image");
+		const component = createAssistantMessageComponent(ctx, message);
+		component.setToolResultImages("read-fresh", [{ type: "image", data: TINY_PNG, mimeType: "image/jpeg" }]);
+
+		expect(toBase64Spy).not.toHaveBeenCalled();
+
+		component.dispose();
+		ctx.settings.override("terminal.showImages", true);
+		component.refreshImagePolicy();
+
+		expect(toBase64Spy).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(budget.keys).toEqual([]);
 	});
 });

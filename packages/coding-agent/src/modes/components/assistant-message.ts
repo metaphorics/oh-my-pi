@@ -277,8 +277,10 @@ export class AssistantMessageComponent extends Container {
 	#nomnomlPngByKey = new Map<string, string>();
 	#nomnomlPngInFlight = new Set<string>();
 	#nomnomlPlacementKeys = new Set<string>();
+	#toolImagePlacementKeys = new Set<string>();
 	readonly #instanceId = ++assistantMessageComponentInstanceSeq;
 	readonly #showImages: () => boolean;
+	#disposed = false;
 	#transcriptBlockFinalized: boolean;
 	/**
 	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
@@ -382,6 +384,12 @@ export class AssistantMessageComponent extends Container {
 
 	/** Re-read the live image setting and rebuild this turn immediately. */
 	refreshImagePolicy(): void {
+		if (this.#disposed) return;
+		if (this.#showImages()) {
+			for (const [toolCallId, images] of this.#toolImagesByCallId) {
+				this.#convertToolImagesForKitty(toolCallId, images);
+			}
+		}
 		if (this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		} else {
@@ -413,9 +421,12 @@ export class AssistantMessageComponent extends Container {
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.proseOnlyThinking = proseOnly;
 	}
-
 	override dispose(): void {
+		if (this.#disposed) return;
+		this.#disposed = true;
 		this.#stopThinkingAnimation();
+		this.#replaceNomnomlPlacements(new Set());
+		this.#replaceToolImagePlacements(new Set());
 		super.dispose();
 	}
 
@@ -615,13 +626,14 @@ export class AssistantMessageComponent extends Container {
 	setToolResultImages(toolCallId: string, images: ImageContent[]): void {
 		if (!toolCallId) return;
 		const validImages = images.filter(img => img.type === "image" && img.data && img.mimeType);
+		const keyPrefix = this.#toolImageKeyPrefix(toolCallId);
 		for (const key of Array.from(this.#convertedKittyImages.keys())) {
-			if (key.startsWith(`${toolCallId}:`)) {
+			if (key.startsWith(keyPrefix)) {
 				this.#convertedKittyImages.delete(key);
 			}
 		}
 		for (const key of Array.from(this.#kittyConversionsInFlight)) {
-			if (key.startsWith(`${toolCallId}:`)) {
+			if (key.startsWith(keyPrefix)) {
 				this.#kittyConversionsInFlight.delete(key);
 			}
 		}
@@ -636,18 +648,27 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	#toolImageKeyPrefix(toolCallId: string): string {
+		return `assistant-tool:am${this.#instanceId}:${toolCallId}:`;
+	}
+
+	#toolImageKey(toolCallId: string, index: number): string {
+		return `${this.#toolImageKeyPrefix(toolCallId)}${index}`;
+	}
+
 	#convertToolImagesForKitty(toolCallId: string, images: ImageContent[]): void {
-		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
+		if (!this.#showImages() || TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
 		for (let index = 0; index < images.length; index++) {
 			const image = images[index];
 			if (!image || image.mimeType === "image/png") continue;
-			const key = `${toolCallId}:${index}`;
+			const key = this.#toolImageKey(toolCallId, index);
 			if (this.#convertedKittyImages.has(key) || this.#kittyConversionsInFlight.has(key)) continue;
 			this.#kittyConversionsInFlight.add(key);
 			new Bun.Image(Buffer.from(image.data, "base64"))
 				.png()
 				.toBase64()
 				.then(data => {
+					if (this.#disposed) return;
 					this.#kittyConversionsInFlight.delete(key);
 					this.#convertedKittyImages.set(key, {
 						type: "image",
@@ -666,11 +687,18 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#renderToolImages(): void {
+		if (!this.#showImages()) {
+			this.#replaceToolImagePlacements(new Set());
+			return;
+		}
 		const imageEntries = Array.from(this.#toolImagesByCallId.entries()).flatMap(([toolCallId, images]) =>
-			images.map((image, index) => ({ image, key: `${toolCallId}:${index}` })),
+			images.map((image, index) => ({ image, key: this.#toolImageKey(toolCallId, index) })),
 		);
-		if (imageEntries.length === 0) return;
-
+		if (imageEntries.length === 0) {
+			this.#replaceToolImagePlacements(new Set());
+			return;
+		}
+		const placementKeys = new Set<string>();
 		this.#contentContainer.addChild(new Spacer(1));
 		for (const { image, key } of imageEntries) {
 			const displayImage =
@@ -678,6 +706,7 @@ export class AssistantMessageComponent extends Container {
 					? this.#convertedKittyImages.get(key)
 					: image;
 			if (TERMINAL.imageProtocol && displayImage) {
+				placementKeys.add(key);
 				this.#contentContainer.addChild(
 					new Image(
 						displayImage.data,
@@ -690,6 +719,14 @@ export class AssistantMessageComponent extends Container {
 			}
 			this.#contentContainer.addChild(new Text(theme.fg("toolOutput", `[Image: ${image.mimeType}]`), 1, 0));
 		}
+		this.#replaceToolImagePlacements(placementKeys);
+	}
+
+	#replaceToolImagePlacements(nextKeys: Set<string>): void {
+		for (const key of this.#toolImagePlacementKeys) {
+			if (!nextKeys.has(key)) this.imageBudget?.release(key);
+		}
+		this.#toolImagePlacementKeys = nextKeys;
 	}
 
 	#appendThinkingExtensions(contentIndex: number, thinkingIndex: number, text: string): void {
@@ -831,6 +868,7 @@ export class AssistantMessageComponent extends Container {
 				this.#nomnomlPngInFlight.add(block.rasterKey);
 				resolveNomnomlPng(block.source)
 					.then(data => {
+						if (this.#disposed) return;
 						this.#nomnomlPngInFlight.delete(block.rasterKey);
 						if (!data) return;
 						this.#nomnomlPngByKey.set(block.rasterKey, data);
@@ -903,6 +941,7 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
+		if (this.#disposed) return;
 		this.#blockVersion++;
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;

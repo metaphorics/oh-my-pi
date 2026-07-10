@@ -123,7 +123,7 @@ import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
-import type { AssistantMessageComponent } from "./components/assistant-message";
+import { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
 import { CustomEditor } from "./components/custom-editor";
@@ -1553,9 +1553,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// clear+replay, then re-append them in their original chat-container order
 		// and restore the `pendingTools` map so streaming routes back into them.
 		const liveComponents: Component[] = [];
+		const liveSet = new Set<Component>();
 		const livePendingTools = new Map<string, ToolExecutionHandle>();
 		if (this.viewSession?.isStreaming) {
-			const liveSet = new Set<Component>();
 			if (this.streamingComponent) liveSet.add(this.streamingComponent);
 			for (const [id, component] of this.pendingTools) {
 				livePendingTools.set(id, component);
@@ -1566,6 +1566,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					if (liveSet.has(child)) liveComponents.push(child);
 				}
 			}
+		}
+		for (const child of this.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent && !liveSet.has(child)) child.dispose();
 		}
 		this.chatContainer.clear();
 		// Live display uses the compacted transcript tail; export/resume callers
