@@ -1908,14 +1908,25 @@ export class MCPCommandController {
 
 		// Honor mcp.lazyDiscovery: a reload must not eagerly spawn every
 		// configured server. discoverDeferred re-reads config and re-exposes
-		// cached schemas + server pseudo-entries without connecting. A command
-		// that needs one server live (add/reauth) passes targetServer so only
-		// that server connects on demand; its failure folds into the same error
-		// map discoverAndConnect would have surfaced. Plain reload/remove/unauth
-		// pass no target, so lazy policy reconnects nothing they don't need.
+		// cached schemas + server pseudo-entries while eagerly connecting only
+		// configured discovery defaults. A command that needs one non-default
+		// server live (add/reauth) passes targetServer so only that server connects
+		// on demand; its failure folds into the same error map discoverAndConnect
+		// would have surfaced. Plain reload/remove/unauth pass no target beyond the
+		// configured defaults.
 		const lazyDiscovery = this.ctx.settings.get("mcp.lazyDiscovery") === true;
-		const result = lazyDiscovery ? await manager.discoverDeferred() : await manager.discoverAndConnect();
-		if (lazyDiscovery && targetServer && manager.getServerConfig(targetServer)) {
+		const discoveryDefaultServers = (this.ctx.settings.get("mcp.discoveryDefaultServers") ?? [])
+			.map(name => name.trim())
+			.filter(Boolean);
+		const result = lazyDiscovery
+			? await manager.discoverDeferred({ discoveryDefaultServers })
+			: await manager.discoverAndConnect();
+		if (
+			lazyDiscovery &&
+			targetServer &&
+			!discoveryDefaultServers.includes(targetServer) &&
+			manager.getServerConfig(targetServer)
+		) {
 			try {
 				await manager.connectServerOnDemand(targetServer);
 			} catch (error) {

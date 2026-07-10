@@ -220,6 +220,26 @@ describe("/mcp reload and add honor mcp.lazyDiscovery", () => {
 		expect(refreshMCPTools).toHaveBeenCalledTimes(1);
 	});
 
+	test("lazy /mcp reload connects configured defaults while leaving non-defaults deferred", async () => {
+		await writeProjectConfig(projectDir, {
+			defaulted: { type: "stdio", command: "default-server" },
+			deferred: { type: "stdio", command: "deferred-server" },
+		});
+		const { controller, mcpManager } = createController({
+			settings: Settings.isolated({
+				"mcp.lazyDiscovery": true,
+				"mcp.discoveryDefaultServers": ["  defaulted  ", "", "   "],
+			}),
+		});
+
+		await controller.handle("/mcp reload");
+
+		expect(mcpManager.discoverDeferred).toHaveBeenCalledWith({
+			discoveryDefaultServers: ["defaulted"],
+		});
+		expect(mcpManager.connectServerOnDemand).not.toHaveBeenCalled();
+	});
+
 	test("eager /mcp reload still uses discoverAndConnect", async () => {
 		await writeProjectConfig(projectDir, {
 			mcp1: { type: "stdio", command: "mcp-one" },
@@ -260,6 +280,34 @@ describe("/mcp reload and add honor mcp.lazyDiscovery", () => {
 			mcpServers?: Record<string, MCPServerConfig>;
 		};
 		expect(saved.mcpServers?.newsrv).toMatchObject({ type: "stdio", command: "new-server" });
+	});
+
+	test("lazy /mcp add does not reconnect a target already handled as a discovery default", async () => {
+		const addedConfig: MCPServerConfig = { type: "stdio", command: "new-server" };
+		const defaultError = "default target connection failed";
+		const { controller, mcpManager, present } = createController({
+			settings: Settings.isolated({
+				"mcp.lazyDiscovery": true,
+				"mcp.discoveryDefaultServers": ["  newsrv  "],
+			}),
+			mcpManagerExtra: {
+				discoverDeferred: vi.fn(async () => ({
+					...emptyLoadResult(),
+					errors: new Map([["newsrv", defaultError]]),
+				})),
+				getServerConfig: vi.fn((name: string) => (name === "newsrv" ? addedConfig : undefined)),
+			},
+		});
+
+		await controller.handle("/mcp add newsrv -- new-server");
+
+		expect(mcpManager.discoverDeferred).toHaveBeenCalledWith({
+			discoveryDefaultServers: ["newsrv"],
+		});
+		expect(mcpManager.connectServerOnDemand).not.toHaveBeenCalled();
+		const output = renderPresented(present.mock.calls);
+		expect(output).toContain("Some servers failed to connect:");
+		expect(output).toContain(`newsrv: ${defaultError}`);
 	});
 
 	test("lazy /mcp add surfaces a targeted connection rejection", async () => {

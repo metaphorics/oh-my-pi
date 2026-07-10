@@ -33,6 +33,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
+	buildDiscoverableToolSearchIndex,
 	type DiscoverableTool,
 	formatDiscoverableToolServerSummary,
 } from "@oh-my-pi/pi-coding-agent/tool-discovery/tool-index";
@@ -126,6 +127,7 @@ function createBm25Session(
 ): LazyDiscoverySession {
 	const activated = options.activated ?? [];
 	let discoverableTools = options.discoverableTools;
+	const initialSearchIndex = buildDiscoverableToolSearchIndex(discoverableTools);
 	return {
 		cwd: "/tmp/lazy-mcp",
 		hasUI: false,
@@ -134,6 +136,7 @@ function createBm25Session(
 		settings: Settings.isolated({ "mcp.lazyDiscovery": true, "mcp.discoveryMode": true }),
 		isMCPDiscoveryEnabled: () => true,
 		getDiscoverableTools: () => discoverableTools,
+		getDiscoverableToolSearchIndex: () => initialSearchIndex,
 		getSelectedMCPToolNames: () => [...activated],
 		activateDiscoveredMCPTools: async (toolNames: string[]) => {
 			for (const name of toolNames) {
@@ -305,6 +308,44 @@ describe("lazy MCP discovery (T6)", () => {
 		} finally {
 			await manager.disconnectAll();
 		}
+	});
+
+	it("ignores description-only edits in cache identity but invalidates transport edits", async () => {
+		const toolCache = new MCPToolCache(storage);
+		const storedConfig: MCPServerConfig = {
+			type: "stdio",
+			command: "cached-server",
+			args: ["--mode", "docs"],
+			env: { TENANT: "alpha" },
+			auth: { type: "apikey", credentialId: "credential-a" },
+			description: "Original display description",
+		};
+		await toolCache.set(CACHED_SERVER, storedConfig, [CACHED_TOOL_DEF]);
+
+		expect(
+			await toolCache.get(CACHED_SERVER, {
+				...storedConfig,
+				description: "Updated display description",
+			}),
+		).toEqual([CACHED_TOOL_DEF]);
+		expect(
+			await toolCache.get(CACHED_SERVER, {
+				...storedConfig,
+				env: { TENANT: "beta" },
+			}),
+		).toBeNull();
+		expect(
+			await toolCache.get(CACHED_SERVER, {
+				...storedConfig,
+				auth: { type: "apikey", credentialId: "credential-b" },
+			}),
+		).toBeNull();
+		expect(
+			await toolCache.get(CACHED_SERVER, {
+				...storedConfig,
+				command: "replacement-server",
+			}),
+		).toBeNull();
 	});
 
 	it("validates guarded cache ownership after hashing and at the persistent write boundary", async () => {
@@ -1544,6 +1585,91 @@ describe("lazy MCP discovery (T6)", () => {
 		} finally {
 			await releaseOldDigest();
 			await Promise.all(cacheWrites);
+			await manager.disconnectAll();
+		}
+	});
+
+	it("search_tool_bm25 initially ranks a cached generic tool by server description without a pseudo-entry", async () => {
+		const config = serverConfig(CACHED_SERVER, "Celestial archive knowledge");
+		fs.writeFileSync(path.join(workDir, ".mcp.json"), JSON.stringify({ mcpServers: { [CACHED_SERVER]: config } }));
+		const genericTool: MCPToolDefinition = {
+			name: "search",
+			description: "Run a query",
+			inputSchema: { type: "object", properties: {} },
+		};
+		const toolCache = new MCPToolCache(storage);
+		await toolCache.set(CACHED_SERVER, config, [genericTool]);
+		const manager = new MCPManager(workDir, toolCache);
+		try {
+			const discovered = await manager.discoverDeferred();
+			expect(manager.getDeferredDiscoverableTools()).toEqual([]);
+			connectSpy.mockImplementation(async (name: string, liveConfig: MCPServerConfig) =>
+				mockConnectionFor(name, liveConfig),
+			);
+			listToolsSpy.mockResolvedValue([genericTool]);
+			const initialTool: DiscoverableTool = {
+				name: `mcp__${CACHED_SERVER}_search`,
+				label: `${CACHED_SERVER}/search`,
+				summary: genericTool.description ?? "search",
+				source: "mcp",
+				serverName: CACHED_SERVER,
+				mcpToolName: "search",
+				schemaKeys: [],
+			};
+			expect(discovered.tools.map(tool => tool.name)).toEqual([initialTool.name]);
+			const session = createBm25Session(manager, { discoverableTools: [initialTool] });
+
+			const result = await new SearchToolBm25Tool(session).execute("cached-desc", {
+				query: "celestial archive knowledge",
+				limit: 5,
+			});
+
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(result.details?.activated_tools).toEqual([initialTool.name]);
+			expect(result.details?.tools.map(match => match.name)).toContain(initialTool.name);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("search_tool_bm25 initially ranks an already-connected generic tool by server description", async () => {
+		const config = serverConfig(CACHED_SERVER, "Celestial archive knowledge");
+		fs.writeFileSync(path.join(workDir, ".mcp.json"), JSON.stringify({ mcpServers: { [CACHED_SERVER]: config } }));
+		const genericTool: MCPToolDefinition = {
+			name: "search",
+			description: "Run a query",
+			inputSchema: { type: "object", properties: {} },
+		};
+		connectSpy.mockImplementation(async (name: string, liveConfig: MCPServerConfig) =>
+			mockConnectionFor(name, liveConfig),
+		);
+		listToolsSpy.mockResolvedValue([genericTool]);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		try {
+			const discovered = await manager.discoverDeferred({ discoveryDefaultServers: [CACHED_SERVER] });
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(manager.getDeferredDiscoverableTools()).toEqual([]);
+			const initialTool: DiscoverableTool = {
+				name: `mcp__${CACHED_SERVER}_search`,
+				label: `${CACHED_SERVER}/search`,
+				summary: genericTool.description ?? "search",
+				source: "mcp",
+				serverName: CACHED_SERVER,
+				mcpToolName: "search",
+				schemaKeys: [],
+			};
+			expect(discovered.tools.map(tool => tool.name)).toEqual([initialTool.name]);
+			const session = createBm25Session(manager, { discoverableTools: [initialTool] });
+
+			const result = await new SearchToolBm25Tool(session).execute("connected-desc", {
+				query: "celestial archive knowledge",
+				limit: 5,
+			});
+
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(result.details?.activated_tools).toEqual([initialTool.name]);
+			expect(result.details?.tools.map(match => match.name)).toContain(initialTool.name);
+		} finally {
 			await manager.disconnectAll();
 		}
 	});

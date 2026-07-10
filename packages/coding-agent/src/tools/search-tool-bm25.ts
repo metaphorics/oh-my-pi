@@ -102,22 +102,31 @@ function getDiscoverableToolsForDescription(session: ToolSession): DiscoverableT
 function withServerDescriptions(session: ToolSession, tools: DiscoverableTool[]): DiscoverableTool[] {
 	const manager = session.mcpManager;
 	if (!manager) return tools;
-	return tools.map(tool => {
+	let changed = false;
+	const enriched = tools.map(tool => {
 		if (tool.source !== "mcp" || tool.deferredServer || typeof tool.serverName !== "string") {
 			return tool;
 		}
 		const description = manager.getServerConfig(tool.serverName)?.description?.slice(0, 200);
 		if (!description || description.trim().length === 0) return tool;
+		changed = true;
 		return { ...tool, serverDescription: description };
 	});
+	return changed ? enriched : tools;
 }
 
 function getDiscoverableToolSearchIndexForExecution(session: ToolSession): DiscoverableToolSearchIndex {
 	try {
 		const cached = session.getDiscoverableToolSearchIndex?.();
-		if (cached) return cached;
+		if (cached) {
+			const tools = cached.documents.map(document => document.tool);
+			const enriched = withServerDescriptions(session, tools);
+			return enriched === tools ? cached : buildDiscoverableToolSearchIndex(enriched);
+		}
 	} catch {}
-	return buildDiscoverableToolSearchIndex(getDiscoverableToolsForDescription(session));
+	return buildDiscoverableToolSearchIndex(
+		withServerDescriptions(session, getDiscoverableToolsForDescription(session)),
+	);
 }
 
 /** Resolve the effective selected tool names (generic or legacy MCP). */

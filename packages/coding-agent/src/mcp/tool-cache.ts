@@ -44,8 +44,13 @@ function toHex(buffer: ArrayBuffer): string {
 	return output;
 }
 
+function cacheRelevantConfig(config: MCPServerConfig): Omit<MCPServerConfig, "description"> {
+	const { description: _description, ...cacheRelevant } = config;
+	return cacheRelevant;
+}
+
 async function hashConfig(config: MCPServerConfig): Promise<string> {
-	const stable = stableStringify(config);
+	const stable = stableStringify(cacheRelevantConfig(config));
 	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stable));
 	return toHex(digest);
 }
