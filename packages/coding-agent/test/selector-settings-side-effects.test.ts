@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -53,6 +55,24 @@ describe("selector setting side effects", () => {
 
 		expect(invalidate).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("applies the terminal.showImages schema path to existing transcript components", () => {
+		const setShowImages = vi.fn();
+		const refreshImagePolicy = vi.fn();
+		const resetDisplay = vi.fn();
+		const tool = Object.assign(Object.create(ToolExecutionComponent.prototype), { setShowImages });
+		const assistant = Object.assign(Object.create(AssistantMessageComponent.prototype), { refreshImagePolicy });
+		const controller = new SelectorController({
+			chatContainer: { children: [tool, assistant] },
+			ui: { resetDisplay },
+		} as unknown as ConstructorParameters<typeof SelectorController>[0]);
+
+		controller.handleSettingChange("terminal.showImages", false);
+
+		expect(setShowImages).toHaveBeenCalledWith(false);
+		expect(refreshImagePolicy).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
 	});
 
 	it("replaces malformed default retry fallback chains from the model selector action", async () => {

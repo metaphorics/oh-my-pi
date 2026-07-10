@@ -8,6 +8,7 @@ import {
 	TERMINAL,
 } from "../terminal-capabilities";
 import type { Component } from "../tui";
+import { wrapTextWithAnsi } from "../utils";
 
 export interface ImageTheme {
 	fallbackColor: (str: string) => string;
@@ -17,6 +18,8 @@ export interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	filename?: string;
+	/** Width-aware text used when graphics are unavailable or budget-suppressed. */
+	fallback?: (width: number) => string | readonly string[];
 	/** Shared budget that caps how many inline images render as live graphics. */
 	budget?: ImageBudget;
 	/**
@@ -84,8 +87,10 @@ export class ImageBudget {
 	#purgeIds: number[] = [];
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
 	#transmitted = new Set<number>();
+	/** Image ids already queued for this frame but not yet emitted. */
+	#pendingTransmitIds = new Set<number>();
 	/** Transmit sequences (full base64) to write once, before this frame's placements. */
-	#pendingTransmits: string[] = [];
+	#pendingTransmits: Array<{ id: number; sequence: string }> = [];
 	// True while the in-flight pass is a partial/throwaway pass (the
 	// non-multiplexer resize viewport fast path) that walks only the visible
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
@@ -142,6 +147,26 @@ export class ImageBudget {
 	}
 
 	/**
+	 * Release one stable logical image key. The key is forgotten immediately so
+	 * a later component gets a fresh graphics id. If that id was transmitted,
+	 * queue its terminal-store deletion and request the repaint that emits it.
+	 * Returns whether a terminal purge was scheduled.
+	 */
+	release(key: string): boolean {
+		const id = this.#keyToId.get(key);
+		if (id === undefined) return false;
+
+		this.#keyToId.delete(key);
+		this.#idToKey.delete(id);
+		this.#pendingTransmitIds.delete(id);
+		this.#pendingTransmits = this.#pendingTransmits.filter(transmit => transmit.id !== id);
+		if (!this.#transmitted.delete(id)) return false;
+		if (!this.#purgeIds.includes(id)) this.#purgeIds.push(id);
+		this.#requestRender();
+		return true;
+	}
+
+	/**
 	 * Begin a render pass. Called by the renderer before composing the frame.
 	 * Pass `stable: true` for a partial/throwaway pass that does not walk the
 	 * whole tree in display order (the resize viewport fast path): {@link observe}
@@ -188,9 +213,8 @@ export class ImageBudget {
 		if (this.#applyingReset) {
 			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
 				const id = this.#passIds[i];
-				this.#purgeIds.push(id);
-				// d=I frees the data too, so the image must re-transmit if it returns.
-				this.#transmitted.delete(id);
+				// d=I is valid only for Kitty ids whose data reached the terminal store.
+				if (this.#transmitted.delete(id) && !this.#purgeIds.includes(id)) this.#purgeIds.push(id);
 				this.#forgetKeyForId(id);
 			}
 			this.#onTerminal = this.#planned;
@@ -214,12 +238,21 @@ export class ImageBudget {
 		return ids;
 	}
 
-	/** All image ids believed to be loaded in the terminal store; clears tracking. */
+	/** All image ids believed to be loaded in the terminal store, plus any queued for purge; clears tracking. */
 	takeAllTransmittedIds(): readonly number[] {
-		if (this.#transmitted.size === 0) return EMPTY_IDS;
-		const ids = [...this.#transmitted];
+		let ids: readonly number[];
+		if (this.#transmitted.size === 0 && this.#purgeIds.length === 0) {
+			ids = EMPTY_IDS;
+		} else if (this.#purgeIds.length === 0) {
+			ids = [...this.#transmitted];
+		} else if (this.#transmitted.size === 0) {
+			ids = this.#purgeIds;
+		} else {
+			ids = [...new Set([...this.#transmitted, ...this.#purgeIds])];
+		}
 		this.#transmitted.clear();
 		this.#purgeIds = [];
+		this.#pendingTransmitIds.clear();
 		this.#pendingTransmits = [];
 		this.#keyToId.clear();
 		this.#idToKey.clear();
@@ -228,7 +261,7 @@ export class ImageBudget {
 
 	/** Whether `imageId`'s data still needs to be transmitted to the terminal. */
 	shouldTransmit(imageId: number): boolean {
-		return !this.#transmitted.has(imageId);
+		return !this.#transmitted.has(imageId) && !this.#pendingTransmitIds.has(imageId);
 	}
 
 	/**
@@ -236,9 +269,9 @@ export class ImageBudget {
 	 * repeated call (e.g. a width-change re-render) never re-sends the data.
 	 */
 	enqueueTransmit(imageId: number, sequence: string): void {
-		if (this.#transmitted.has(imageId)) return;
-		this.#transmitted.add(imageId);
-		this.#pendingTransmits.push(sequence);
+		if (this.#transmitted.has(imageId) || this.#pendingTransmitIds.has(imageId)) return;
+		this.#pendingTransmitIds.add(imageId);
+		this.#pendingTransmits.push({ id: imageId, sequence });
 	}
 
 	/** Whether a frame has image data queued but not yet written to the terminal. */
@@ -264,7 +297,10 @@ export class ImageBudget {
 	/** Transmit sequences to write before this frame's placements; clears the queue. */
 	takeTransmits(): readonly string[] {
 		if (this.#pendingTransmits.length === 0) return EMPTY_TRANSMITS;
-		const sequences = this.#pendingTransmits;
+		const pending = this.#pendingTransmits;
+		for (const transmit of pending) this.#transmitted.add(transmit.id);
+		const sequences = pending.map(transmit => transmit.sequence);
+		this.#pendingTransmitIds.clear();
 		this.#pendingTransmits = [];
 		return sequences;
 	}
@@ -280,6 +316,7 @@ export class ImageBudget {
 	forgetTransmitted(): void {
 		if (this.#transmitted.size === 0 && this.#pendingTransmits.length === 0) return;
 		this.#transmitted.clear();
+		this.#pendingTransmitIds.clear();
 		this.#pendingTransmits = [];
 	}
 
@@ -419,11 +456,11 @@ export class Image implements Component {
 				const placement = moveUp + (result.sequence ?? "");
 				lines.push(cursorRows > 0 ? SAVE_CURSOR + placement + RESTORE_CURSOR : placement);
 			} else {
-				lines = this.#fallbackLines();
+				lines = this.#fallbackLines(maxWidth);
 			}
 			this.#renderedGraphicRows = Math.max(this.#renderedGraphicRows, lines.length);
 		} else {
-			lines = this.#fallbackLines();
+			lines = this.#fallbackLines(maxWidth);
 		}
 
 		this.#cachedLines = lines;
@@ -445,16 +482,16 @@ export class Image implements Component {
 	 * (stale band + recommit). Reserved rows stay non-plain so blank-edge
 	 * trimming cannot collapse the block either.
 	 */
-	#fallbackLines(): string[] {
-		const fallback = this.#theme.fallbackColor(
-			imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
-		);
-		if (this.#renderedGraphicRows <= 1) return [fallback];
-		const lines: string[] = [];
-		for (let i = 0; i < this.#renderedGraphicRows - 1; i++) {
-			lines.push(RESERVED_IMAGE_ROW);
-		}
-		lines.push(fallback);
-		return lines;
+	#fallbackLines(width: number): string[] {
+		const custom = this.#options.fallback?.(Math.max(1, width));
+		const fallbackLines =
+			custom === undefined
+				? [this.#theme.fallbackColor(imageFallback(this.#mimeType, this.#dimensions, this.#options.filename))]
+				: (typeof custom === "string" ? custom.split("\n") : [...custom]).flatMap(line =>
+						wrapTextWithAnsi(line, Math.max(1, width)),
+					);
+		if (fallbackLines.length === 0) fallbackLines.push("");
+		const reservedRows = Math.max(0, this.#renderedGraphicRows - fallbackLines.length);
+		return [...Array.from({ length: reservedRows }, () => RESERVED_IMAGE_ROW), ...fallbackLines];
 	}
 }

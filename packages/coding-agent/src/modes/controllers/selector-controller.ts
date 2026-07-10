@@ -414,11 +414,17 @@ export class SelectorController {
 
 			// Settings with UI side effects
 			case "showImages":
+			case "terminal.showImages":
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof ToolExecutionComponent) {
 						child.setShowImages(value as boolean);
+					} else if (child instanceof AssistantMessageComponent) {
+						child.refreshImagePolicy();
 					}
 				}
+				// Image placements and their text replacements may already be frozen
+				// in native scrollback. Retire those snapshots and replay the transcript.
+				this.ctx.ui.resetDisplay();
 				break;
 			case "hideThinkingBlock":
 				this.ctx.hideThinkingBlock = value as boolean;

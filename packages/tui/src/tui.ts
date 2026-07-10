@@ -1673,6 +1673,7 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		if (this.#stopped) return;
 		// Leave the alt buffer first so the teardown cursor math below runs against
 		// the restored normal screen (which #previousLines still describes).
 		if (this.#resizeAltActive) {
@@ -1685,10 +1686,8 @@ export class TUI extends Container {
 			this.#altActive = false;
 			this.#altPreviousLines = [];
 		}
-		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
-			for (const id of this.#imageBudget.takeAllTransmittedIds()) {
-				this.terminal.write(encodeKittyDeleteImage(id));
-			}
+		for (const id of this.#imageBudget.takeAllTransmittedIds()) {
+			this.terminal.write(encodeKittyDeleteImage(id));
 		}
 		this.#clearSixelProbeState();
 		this.#stopped = true;
@@ -2786,8 +2785,6 @@ export class TUI extends Container {
 		let purgeSequence = "";
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of this.#imageBudget.takePurgeIds()) purgeSequence += encodeKittyDeleteImage(id);
-		} else {
-			this.#imageBudget.takePurgeIds();
 		}
 
 		// 6. Emit.

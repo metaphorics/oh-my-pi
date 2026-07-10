@@ -52,6 +52,8 @@ const nomnomlRuntime = nomnoml as NomnomlRuntime;
 const MAX_CANVAS_CELLS = 40_000;
 const MAX_DIMENSION = 400;
 const WIDE_CONTINUATION_CELL = "\0";
+const COMPARTMENT_DIVIDER = Symbol("compartment-divider");
+type NodeRow = string | typeof COMPARTMENT_DIVIDER;
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 class CharGrid {
@@ -183,27 +185,34 @@ function isHidden(node: LayoutNode, config: NomnomlConfig): boolean {
 	return config.styles?.[node.type ?? "class"]?.visual === "hidden";
 }
 
-function collectNodeRows(node: LayoutNode, config: NomnomlConfig, depth = 0): string[] {
-	const rows: string[] = [];
+function collectNodeRows(node: LayoutNode, config: NomnomlConfig, depth = 0): NodeRow[] {
+	const rows: NodeRow[] = [];
 	const parts = node.parts ?? [];
 	for (const part of parts) {
-		for (const line of part.lines ?? []) rows.push(line);
-		const children = part.nodes ?? [];
-		if (children.length > 0) {
-			for (const child of children) {
-				if (!isHidden(child, config)) rows.push(...collectNodeRows(child, config, depth + 1));
-			}
+		const partRows: NodeRow[] = [];
+		for (const line of part.lines ?? []) partRows.push(line);
+		for (const child of part.nodes ?? []) {
+			if (!isHidden(child, config)) partRows.push(...collectNodeRows(child, config, depth + 1));
 		}
-		if (depth === 0 && rows.length > 0 && part !== parts[parts.length - 1])
-			rows.push("─".repeat(Math.max(1, nodeWidth(rows))));
+		for (const row of partRows) {
+			if (row === COMPARTMENT_DIVIDER) {
+				rows.push(row);
+				continue;
+			}
+			const trimmed = row.trim();
+			if (trimmed) rows.push(trimmed);
+		}
+		if (depth === 0 && rows.length > 0 && part !== parts[parts.length - 1]) rows.push(COMPARTMENT_DIVIDER);
 	}
 	if (rows.length === 0 && node.id) rows.push(node.id);
-	return rows.map(row => row.trim()).filter(row => row.length > 0);
+	return rows;
 }
 
-function nodeWidth(rows: string[]): number {
+function nodeWidth(rows: NodeRow[]): number {
 	let width = 1;
-	for (const row of rows) width = Math.max(width, Bun.stringWidth(row));
+	for (const row of rows) {
+		if (row !== COMPARTMENT_DIVIDER) width = Math.max(width, Bun.stringWidth(row));
+	}
 	return width;
 }
 
@@ -233,6 +242,10 @@ function drawNode(grid: CharGrid, node: LayoutNode, config: NomnomlConfig): void
 	const availableRows = Math.max(1, height - 2);
 	for (let i = 0; i < Math.min(rows.length, availableRows); i++) {
 		const row = rows[i] ?? "";
+		if (row === COMPARTMENT_DIVIDER) {
+			for (let x = left + 1; x < right; x++) grid.set(x, top + 1 + i, "─");
+			continue;
+		}
 		const rowWidth = Bun.stringWidth(row);
 		const x = left + 1 + Math.max(0, Math.floor((width - 2 - rowWidth) / 2));
 		grid.text(x, top + 1 + i, row);
@@ -255,11 +268,35 @@ function drawAssociationDecorations(grid: CharGrid, assoc: Association): void {
 	if (assoc.type === "-/-") return;
 	const points = assoc.path ?? assoc.points ?? [];
 	if (points.length < 2) return;
-	const type = assoc.type ?? "";
-	if (type.includes(">")) drawArrow(grid, points, false);
-	if (type.includes("<")) drawArrow(grid, points, true);
+	const tokens = (assoc.type ?? "").split(/[-_]/);
+	drawTerminator(grid, points, true, tokens[0] ?? "");
+	drawTerminator(grid, points, false, tokens[tokens.length - 1] ?? "");
 	drawLabel(grid, assoc.startLabel);
 	drawLabel(grid, assoc.endLabel);
+}
+
+function drawTerminator(grid: CharGrid, points: Point[], atStart: boolean, terminator: string): void {
+	if (!terminator) return;
+	// path = [sourceNode, ...edge.points, targetNode]; marker at path[1]/path[length-2]
+	const markerPoint = atStart ? points[1] : points[points.length - 2];
+	const nodePoint = atStart ? points[0] : points[points.length - 1];
+	if (!markerPoint || !nodePoint) return;
+	const dx = nodePoint.x - markerPoint.x;
+	const dy = nodePoint.y - markerPoint.y;
+	const direction = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? "right" : "left") : dy >= 0 ? "down" : "up";
+	const directional = (right: string, left: string, down: string, up: string): string =>
+		direction === "right" ? right : direction === "left" ? left : direction === "down" ? down : up;
+	let glyph: string;
+	if (terminator === ">" || terminator === "<") glyph = directional(">", "<", "v", "^");
+	else if (terminator === ":>" || terminator === "<:") glyph = directional("▷", "◁", "▽", "△");
+	else if (terminator === "+") glyph = "♦";
+	else if (terminator === "o") glyph = "◇";
+	else if (terminator === "(" || terminator === ")") glyph = directional(")", "(", "⌣", "⌢");
+	else if (terminator === "(o" || terminator === "o)") glyph = "⊙";
+	else if (terminator === ">o" || terminator === "o<") glyph = "⊚";
+	else return;
+	const point = roundPoint(markerPoint);
+	grid.set(point.x, point.y, glyph);
 }
 
 function roundPoint(point: Point): Point {
@@ -281,18 +318,6 @@ function drawSegment(grid: CharGrid, start: Point, end: Point): void {
 	const min = Math.min(start.x, end.x);
 	const max = Math.max(start.x, end.x);
 	for (let x = min; x <= max; x++) grid.set(x, start.y, "─");
-}
-
-function drawArrow(grid: CharGrid, points: Point[], atStart: boolean): void {
-	// path = [sourceNode, ...edge.points, targetNode]; marker at path[1]/path[length-2]
-	const arrowPoint = atStart ? points[1] : points[points.length - 2];
-	const towardPoint = atStart ? points[0] : points[points.length - 1];
-	if (!arrowPoint || !towardPoint) return;
-	const dx = towardPoint.x - arrowPoint.x;
-	const dy = towardPoint.y - arrowPoint.y;
-	const char = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? ">" : "<") : dy >= 0 ? "v" : "^";
-	const point = roundPoint(arrowPoint);
-	grid.set(point.x, point.y, char);
 }
 
 function drawLabel(grid: CharGrid, label: Label | undefined): void {

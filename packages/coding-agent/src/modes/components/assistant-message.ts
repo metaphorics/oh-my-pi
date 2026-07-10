@@ -1,9 +1,9 @@
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { Container, Image, type ImageBudget, ImageProtocol, Markdown, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
-import { getMarkdownNomnomlRendering, resolveNomnomlPng } from "../../modes/theme/nomnoml-cache";
+import { getMarkdownNomnomlRendering, resolveNomnomlAscii, resolveNomnomlPng } from "../../modes/theme/nomnoml-cache";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
@@ -81,7 +81,7 @@ type TopLevelNomnomlBlock = {
 
 type TextNomnomlSegment =
 	| { type: "markdown"; text: string }
-	| { type: "image"; key: string; data: string; mimeType: "image/png" };
+	| { type: "image"; key: string; data: string; mimeType: "image/png"; source: string };
 
 function nomnomlRasterKey(source: string): string {
 	return `nomnoml:${Bun.hash(source)}`;
@@ -157,6 +157,7 @@ function splitNomnomlImages(
 			key: nomnomlImageKey(block.rasterKey, placementScope, occurrence, block.start),
 			data,
 			mimeType: "image/png",
+			source: block.source,
 		});
 		lastIndex = block.end;
 	}
@@ -275,8 +276,9 @@ export class AssistantMessageComponent extends Container {
 	#kittyConversionsInFlight = new Set<string>();
 	#nomnomlPngByKey = new Map<string, string>();
 	#nomnomlPngInFlight = new Set<string>();
+	#nomnomlPlacementKeys = new Set<string>();
 	readonly #instanceId = ++assistantMessageComponentInstanceSeq;
-	#showImages = true;
+	readonly #showImages: () => boolean;
 	#transcriptBlockFinalized: boolean;
 	/**
 	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
@@ -344,10 +346,10 @@ export class AssistantMessageComponent extends Container {
 		private readonly thinkingRenderers: readonly AssistantThinkingRenderer[] = [],
 		private readonly imageBudget?: ImageBudget,
 		private proseOnlyThinking = true,
-		showImages = true,
+		showImages: boolean | (() => boolean) = true,
 	) {
 		super();
-		this.#showImages = showImages;
+		this.#showImages = typeof showImages === "function" ? showImages : () => showImages;
 		this.#transcriptBlockFinalized = message !== undefined;
 
 		// Slim cache-invalidation divider, populated above the content when this
@@ -378,12 +380,20 @@ export class AssistantMessageComponent extends Container {
 		this.#blockVersion++;
 	}
 
+	/** Re-read the live image setting and rebuild this turn immediately. */
+	refreshImagePolicy(): void {
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		} else {
+			this.invalidate();
+		}
+	}
+
 	override invalidate(): void {
 		super.invalidate();
-		// Theme/symbol changes arrive via invalidate(). Fast-path children captured
-		// getMarkdownTheme() at construction, so drop them and force the teardown
-		// path to rebuild with the current theme. Streaming updates call
-		// updateContent() directly and keep the fast path.
+		// Theme/symbol changes arrive via invalidate(). A captured Markdown child
+		// would otherwise retain the old theme, and an image-policy change could
+		// retain an SVG or ASCII child built under the previous setting.
 		this.#fastPathKey = undefined;
 		this.#fastPathItems = undefined;
 		if (this.#lastMessage) {
@@ -704,7 +714,9 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#computeShapeKey(message: AssistantMessage): string {
-		const parts: string[] = [`htb:${this.hideThinkingBlock ? 1 : 0}|pot:${this.proseOnlyThinking ? 1 : 0}`];
+		const parts: string[] = [
+			`htb:${this.hideThinkingBlock ? 1 : 0}|pot:${this.proseOnlyThinking ? 1 : 0}|img:${this.#showImages() ? 1 : 0}`,
+		];
 		for (const content of message.content) {
 			if (content.type === "text") {
 				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");
@@ -803,9 +815,9 @@ export class AssistantMessageComponent extends Container {
 		return true;
 	}
 
-	#queueNomnomlPngs(message: AssistantMessage): void {
+	#queueNomnomlPngs(message: AssistantMessage, showImages: boolean): void {
 		if (
-			!this.#showImages ||
+			!showImages ||
 			this.#lastUpdateTransient ||
 			!TERMINAL.imageProtocol ||
 			getMarkdownNomnomlRendering() !== "svg"
@@ -840,9 +852,43 @@ export class AssistantMessageComponent extends Container {
 				segment.data,
 				segment.mimeType,
 				{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
-				{ ...resolveImageOptions(), budget: this.imageBudget, imageKey: segment.key },
+				{
+					...resolveImageOptions(),
+					budget: this.imageBudget,
+					imageKey: segment.key,
+					fallback: width => {
+						const source = sanitizeText(segment.source);
+						const ascii = resolveNomnomlAscii(source, width);
+						if (ascii === null) return [theme.fg("toolOutput", "[Nomnoml diagram]")];
+						return ascii.split("\n").map(line => theme.fg("toolOutput", line));
+					},
+				},
 			),
 		);
+	}
+
+	#nomnomlKeysFor(message: AssistantMessage, renderImages: boolean): Set<string> {
+		const keys = new Set<string>();
+		if (!renderImages) return keys;
+		for (let i = 0; i < message.content.length; i++) {
+			const content = message.content[i];
+			if (content?.type !== "text" || !canonicalizeMessage(content.text)) continue;
+			for (const segment of splitNomnomlImages(
+				content.text.trim(),
+				this.#nomnomlPngByKey,
+				`am${this.#instanceId}:${i}`,
+			)) {
+				if (segment.type === "image") keys.add(segment.key);
+			}
+		}
+		return keys;
+	}
+
+	#replaceNomnomlPlacements(nextKeys: Set<string>): void {
+		for (const key of this.#nomnomlPlacementKeys) {
+			if (!nextKeys.has(key)) this.imageBudget?.release(key);
+		}
+		this.#nomnomlPlacementKeys = nextKeys;
 	}
 
 	#appendMarkdownText(
@@ -860,6 +906,7 @@ export class AssistantMessageComponent extends Container {
 		this.#blockVersion++;
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
+		const showImages = this.#showImages();
 
 		// Streaming-speed gauge: only a live, in-flight render of the single
 		// animating hidden-thinking block feeds the shared session tracker. The
@@ -911,7 +958,13 @@ export class AssistantMessageComponent extends Container {
 			return false;
 		});
 
-		this.#queueNomnomlPngs(message);
+		const renderNomnomlImages =
+			showImages &&
+			!this.#lastUpdateTransient &&
+			!!TERMINAL.imageProtocol &&
+			getMarkdownNomnomlRendering() === "svg";
+		this.#replaceNomnomlPlacements(this.#nomnomlKeysFor(message, renderNomnomlImages));
+		this.#queueNomnomlPngs(message, showImages);
 
 		// Fast path: reuse Markdown children when shape is stable during streaming
 		if (this.#tryFastPathUpdate(message, opts)) return;
@@ -936,11 +989,6 @@ export class AssistantMessageComponent extends Container {
 
 		// Render content in order
 		let thinkingIndex = 0;
-		const renderNomnomlImages =
-			this.#showImages &&
-			!this.#lastUpdateTransient &&
-			!!TERMINAL.imageProtocol &&
-			getMarkdownNomnomlRendering() === "svg";
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {

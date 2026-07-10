@@ -1,11 +1,18 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { ImageBudget, ImageProtocol, Markdown, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import {
+	Container,
+	Image,
+	ImageBudget,
+	ImageProtocol,
+	Markdown,
+	setTerminalImageProtocol,
+	TERMINAL,
+} from "@oh-my-pi/pi-tui";
 import { Settings } from "../../config/settings";
 import { buildSystemPrompt } from "../../system-prompt";
 import { AssistantMessageComponent } from "../components/assistant-message";
-import type { InteractiveModeContext } from "../types";
-import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
+import { type AssistantMessageContext, createAssistantMessageComponent } from "../utils/interactive-context-helpers";
 import * as nomnomlCache from "./nomnoml-cache";
 import {
 	getMarkdownTheme,
@@ -57,6 +64,20 @@ class RecordingImageBudget extends ImageBudget {
 		this.keys.push(key);
 		return super.acquireId(key);
 	}
+}
+
+function createLiveContext(
+	showImages: boolean,
+	budget: ImageBudget,
+	requestRender: () => void,
+): AssistantMessageContext & { settings: Settings } {
+	return {
+		effectiveHideThinkingBlock: false,
+		proseOnlyThinking: true,
+		settings: Settings.isolated({ "terminal.showImages": showImages }),
+		ui: { imageBudget: budget, requestRender },
+		viewSession: { extensionRunner: undefined },
+	};
 }
 
 beforeAll(async () => {
@@ -274,13 +295,7 @@ describe("Nomnoml SVG assistant rendering", () => {
 		const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockReturnValue(rasterResult.promise);
 		const budget = new RecordingImageBudget(10);
 		const requestRender = vi.fn();
-		const ctx = {
-			effectiveHideThinkingBlock: false,
-			proseOnlyThinking: true,
-			settings: Settings.isolated({ "terminal.showImages": false }),
-			ui: { imageBudget: budget, requestRender },
-			viewSession: { extensionRunner: undefined },
-		} as unknown as InteractiveModeContext;
+		const ctx = createLiveContext(false, budget, requestRender);
 		const fence = "```nomnoml\n[A] -> [B]\n```";
 		const component = createAssistantMessageComponent(ctx, createAssistantMessage(fence));
 
@@ -295,5 +310,209 @@ describe("Nomnoml SVG assistant rendering", () => {
 		expect(rendered).toContain("A");
 		expect(rendered).toContain("B");
 		expect(rendered).not.toContain("[Image:");
+	});
+
+	it("turns images on for an existing live component after invalidation", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const budget = new RecordingImageBudget(10);
+		const imageUpdated = Promise.withResolvers<void>();
+		const ctx = createLiveContext(false, budget, imageUpdated.resolve);
+		const message = createAssistantMessage("```nomnoml\n[A] -> [B]\n```");
+		const component = createAssistantMessageComponent(ctx, message);
+
+		ctx.settings.override("terminal.showImages", true);
+		component.invalidate();
+		await imageUpdated.promise;
+		await Promise.resolve();
+		budget.beginPass();
+		const rendered = component.render(120).join("\n");
+		budget.endPass();
+
+		expect(rasterSpy).toHaveBeenCalledTimes(1);
+		expect(budget.keys).toHaveLength(1);
+		expect(rendered).toContain("\x1b_G");
+	});
+
+	it("turns images off for an existing live component on update", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const budget = new RecordingImageBudget(10);
+		const imageUpdated = Promise.withResolvers<void>();
+		const ctx = createLiveContext(true, budget, imageUpdated.resolve);
+		const message = createAssistantMessage("```nomnoml\n[A] -> [B]\n```");
+		const component = createAssistantMessageComponent(ctx, message);
+		await imageUpdated.promise;
+		await Promise.resolve();
+
+		budget.beginPass();
+		const initial = component.render(120).join("\n");
+		budget.endPass();
+		const placementKey = budget.keys.at(-1);
+		if (!placementKey) throw new Error("Expected a Nomnoml placement key");
+		const initialId = budget.acquireId(placementKey);
+		expect(initial).toContain("\x1b_G");
+		expect(budget.takeTransmits()).toHaveLength(1);
+		const genericId = budget.acquireId("generic-tool-image");
+		budget.enqueueTransmit(genericId, "generic-transmit");
+		expect(budget.takeTransmits()).toEqual(["generic-transmit"]);
+
+		ctx.settings.override("terminal.showImages", false);
+		component.refreshImagePolicy();
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(budget.takePurgeIds()).toEqual([initialId]);
+		expect(budget.acquireId("generic-tool-image")).toBe(genericId);
+		expect(budget.shouldTransmit(genericId)).toBe(false);
+		expect(rendered).toContain("A");
+		expect(rendered).toContain("B");
+		expect(rendered).not.toContain("\x1b_G");
+		expect(rendered).not.toContain("[Image:");
+		const imageChildren = component.children.flatMap(child =>
+			child instanceof Container ? child.children.filter(grandchild => grandchild instanceof Image) : [],
+		);
+		expect(imageChildren).toEqual([]);
+
+		component.refreshImagePolicy();
+		expect(budget.takePurgeIds()).toEqual([]);
+
+		ctx.settings.override("terminal.showImages", true);
+		component.refreshImagePolicy();
+		budget.beginPass();
+		const restored = component.render(120).join("\n");
+		budget.endPass();
+		const restoredId = budget.acquireId(placementKey);
+		expect(restored).toContain("\x1b_G");
+		expect(restoredId).not.toBe(initialId);
+		expect(budget.takeTransmits()).toHaveLength(1);
+	});
+
+	it("resolves budget fallbacks at the effective image width", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const asciiSpy = spyOn(nomnomlCache, "resolveNomnomlAscii");
+		const budget = new RecordingImageBudget(1);
+		let updates = 0;
+		const loaded = Promise.withResolvers<void>();
+		const onUpdate = () => {
+			updates += 1;
+			if (updates === 2) loaded.resolve();
+		};
+		const source = "[Alpha] -> [Beta]";
+		const older = new AssistantMessageComponent(
+			createAssistantMessage(`\`\`\`nomnoml\n${source}\n\`\`\``),
+			false,
+			onUpdate,
+			[],
+			budget,
+		);
+		const newer = new AssistantMessageComponent(
+			createAssistantMessage("```nomnoml\n[New] -> [Diagram]\n```"),
+			false,
+			onUpdate,
+			[],
+			budget,
+		);
+		await loaded.promise;
+		await Promise.resolve();
+
+		let narrow = "";
+		for (let pass = 0; pass < 2; pass++) {
+			budget.beginPass();
+			narrow = stripAnsi(older.render(10).join("\n"));
+			newer.render(10);
+			budget.endPass();
+		}
+		expect(asciiSpy).toHaveBeenCalledWith(source, 8);
+		expect(narrow).toContain("Alpha");
+		expect(narrow).toContain("Beta");
+		expect(narrow).not.toContain(source);
+		expect(narrow).not.toContain("```nomnoml");
+		expect(narrow.split("\n").every(line => Bun.stringWidth(line) <= 8)).toBe(true);
+
+		budget.beginPass();
+		const tooNarrow = stripAnsi(older.render(6).join("\n"));
+		newer.render(6);
+		budget.endPass();
+		expect(asciiSpy).toHaveBeenCalledWith(source, 4);
+		expect(tooNarrow).not.toContain("Alpha");
+		expect(tooNarrow).not.toContain("Beta");
+		expect(tooNarrow).not.toContain(source);
+		expect(tooNarrow).not.toContain("┌");
+		expect(tooNarrow.replace(/\s/g, "")).toContain("[Nomnomldiagram]");
+	});
+	it("renders budget-demoted hidden-label diagrams without leaking source at narrow width", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const budget = new RecordingImageBudget(1);
+		let updates = 0;
+		const loaded = Promise.withResolvers<void>();
+		const onUpdate = () => {
+			updates += 1;
+			if (updates === 2) loaded.resolve();
+		};
+		const source =
+			"[Public] -> [<hidden> built-in-secret]\n[Public] -> [<ghost> custom-secret]\n#.ghost: visual=hidden";
+		const older = new AssistantMessageComponent(
+			createAssistantMessage(`\`\`\`nomnoml\n${source}\n\`\`\``),
+			false,
+			onUpdate,
+			[],
+			budget,
+		);
+		const newer = new AssistantMessageComponent(
+			createAssistantMessage("```nomnoml\n[Other] -> [Diagram]\n```"),
+			false,
+			onUpdate,
+			[],
+			budget,
+		);
+		await loaded.promise;
+		await Promise.resolve();
+
+		let rendered = "";
+		for (let pass = 0; pass < 2; pass++) {
+			budget.beginPass();
+			rendered = stripAnsi(older.render(20).join("\n"));
+			newer.render(20);
+			budget.endPass();
+		}
+
+		expect(rendered).toContain("Public");
+		expect(rendered).not.toContain("built-in-secret");
+		expect(rendered).not.toContain("custom-secret");
+		expect(rendered).not.toContain("secret");
+		expect(rendered).not.toContain("visual=hidden");
+		expect(rendered).not.toContain("[<hidden>");
+		expect(rendered).not.toContain("[Image:");
+		expect(rendered).not.toContain("```");
+		expect(rendered.split("\n").every(line => Bun.stringWidth(line) <= 18)).toBe(true);
+	});
+
+	it("falls back to a neutral label when ASCII cannot render after protocol loss", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const imageUpdated = Promise.withResolvers<void>();
+		const source = "[broken\x1b[31m";
+		const component = new AssistantMessageComponent(
+			createAssistantMessage(`\`\`\`nomnoml\n${source}\n\`\`\``),
+			false,
+			imageUpdated.resolve,
+		);
+		await imageUpdated.promise;
+		await Promise.resolve();
+
+		setTerminalImageProtocol(null);
+		const rendered = stripAnsi(component.render(12).join("\n"));
+		expect(rendered).not.toContain("[broken");
+		expect(rendered).not.toContain("[Image:");
+		expect(rendered).not.toContain("\x1b");
+		expect(rendered).toContain("Nomnoml");
+		expect(rendered).toContain("diagram");
+		expect(rendered.split("\n").every(line => Bun.stringWidth(line) <= 10)).toBe(true);
 	});
 });

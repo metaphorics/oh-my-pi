@@ -58,6 +58,8 @@ describe("ImageBudget", () => {
 		const budget = new ImageBudget(2, () => {
 			renders += 1;
 		});
+		budget.enqueueTransmit(1, "TX1");
+		expect(budget.takeTransmits()).toEqual(["TX1"]);
 
 		// At cap: nothing demoted.
 		expect(pass(budget, 2).suppressed).toEqual([false, false]);
@@ -130,6 +132,31 @@ describe("ImageBudget", () => {
 		expect(budget.acquireId()).not.toBe(budget.acquireId());
 	});
 
+	it("releases only loaded stable images and reacquires them with fresh ids", () => {
+		const requestRender = vi.fn();
+		const budget = new ImageBudget(3, requestRender);
+		const releasedId = budget.acquireId("nomnoml:removed");
+		const survivingId = budget.acquireId("nomnoml:surviving");
+
+		budget.enqueueTransmit(releasedId, "removed-transmit");
+		budget.enqueueTransmit(survivingId, "surviving-transmit");
+		expect(budget.release("nomnoml:removed")).toBe(false);
+		expect(budget.takeTransmits()).toEqual(["surviving-transmit"]);
+		expect(budget.takePurgeIds()).toEqual([]);
+		expect(requestRender).not.toHaveBeenCalled();
+
+		const loadedId = budget.acquireId("nomnoml:removed");
+		budget.enqueueTransmit(loadedId, "loaded-transmit");
+		expect(budget.takeTransmits()).toEqual(["loaded-transmit"]);
+		expect(budget.release("nomnoml:removed")).toBe(true);
+		expect(budget.release("nomnoml:removed")).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([loadedId]);
+		expect(budget.takePurgeIds()).toEqual([]);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(budget.acquireId("nomnoml:removed")).not.toBe(loadedId);
+		expect(budget.acquireId("nomnoml:surviving")).toBe(survivingId);
+	});
+
 	it("initializes separate budgets with different starting IDs", () => {
 		const budget1 = new ImageBudget();
 		const budget2 = new ImageBudget();
@@ -195,7 +222,7 @@ describe("ImageBudget", () => {
 		budget.observe(id2);
 		budget.observe(id3);
 		expect(budget.endPass()).toBe(true);
-		expect([...budget.takePurgeIds()]).toEqual([oldId]);
+		expect([...budget.takePurgeIds()]).toEqual([]);
 
 		const suppressedId = budget.acquireId("keyA");
 		expect(suppressedId).not.toBe(oldId);
@@ -426,6 +453,95 @@ describe("Image budget integration", () => {
 		expect(olderLines.join("")).toContain("[Image:");
 		expect(olderLines.join("")).not.toContain("\x1b_G");
 		expect(newerLines.at(-1) ?? "").toContain("\x1b_G");
+	});
+
+	it("uses a width-aware custom fallback when the image protocol is unavailable", () => {
+		terminal.imageProtocol = null;
+		const receivedWidths: number[] = [];
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{
+				fallback: width => {
+					receivedWidths.push(width);
+					return "diagram source remains readable";
+				},
+			},
+		);
+
+		const lines = image.render(12);
+		expect(receivedWidths).toEqual([10]);
+		expect(lines.join(" ")).toContain("diagram");
+		expect(lines.join(" ")).not.toContain("[Image:");
+		expect(lines.every(line => Bun.stringWidth(Bun.stripANSI(line)) <= 10)).toBe(true);
+	});
+
+	it("keeps generic fallback behavior when no custom fallback is supplied", () => {
+		terminal.imageProtocol = null;
+		const image = new Image(BASE64_ONE_PIXEL_PNG, "image/png", { fallbackColor: t => t });
+		const rendered = image.render(20).join("\n");
+		expect(rendered).toContain("[Image:");
+		expect(rendered).toContain("image/png");
+	});
+
+	it("uses the custom fallback on budget demotion without shrinking prior graphic height", () => {
+		const budget = new ImageBudget(1, () => {});
+		const older = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "diagram", fallback: () => "ASCII diagram" },
+			{ widthPx: 40, heightPx: 40 },
+		);
+		const newer = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "new" },
+		);
+		let initialHeight = 0;
+		let demoted: readonly string[] = [];
+		for (let pass = 0; pass < 2; pass++) {
+			budget.beginPass();
+			const olderLines = older.render(20);
+			if (pass === 0) initialHeight = olderLines.length;
+			demoted = olderLines;
+			newer.render(20);
+			budget.endPass();
+		}
+
+		expect(demoted.join("")).toContain("ASCIIdiagram");
+		expect(demoted.join("\n")).not.toContain("[Image:");
+		expect(demoted).toHaveLength(initialHeight);
+	});
+
+	it("keeps Sixel demotions out of the Kitty purge queue", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const budget = new ImageBudget(1, () => {});
+		const older = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "sixel-old" },
+		);
+		const newer = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "sixel-new" },
+		);
+
+		for (let passIndex = 0; passIndex < 2; passIndex++) {
+			budget.beginPass();
+			older.render(20);
+			newer.render(20);
+			budget.endPass();
+			expect(budget.takeTransmits()).toEqual([]);
+		}
+
+		expect(budget.takePurgeIds()).toEqual([]);
+		expect(budget.takeAllTransmittedIds()).toEqual([]);
 	});
 });
 
@@ -663,6 +779,43 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("retains a released Kitty purge through protocol loss and flushes it once on stop", async () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const tui = new TUI(term);
+		const imageId = tui.imageBudget.acquireId("released-after-kitty");
+		tui.addChild(makeImage(tui.imageBudget, "released-after-kitty"));
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(writes.join("")).toContain("\x1b_Ga=t");
+			writes.length = 0;
+
+			expect(tui.imageBudget.release("released-after-kitty")).toBe(true);
+			terminal.imageProtocol = null;
+			await settle(term);
+
+			const deletion = encodeKittyDeleteImage(imageId);
+			expect(writes.join("")).not.toContain(deletion);
+
+			tui.stop();
+			const writesAfterFirstStop = writes.join("");
+			expect(writesAfterFirstStop.split(deletion).length - 1).toBe(1);
+
+			tui.stop();
+			expect(writes.join("")).toBe(writesAfterFirstStop);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("holds the first Ghostty image paint until the startup settle window passes", () => {
 		const originalId = terminal.id;
 		const originalGraphics = { ...getKittyGraphics() };
@@ -748,6 +901,7 @@ describe("ImageBudget transmit tracking", () => {
 		const budget = new ImageBudget(3, () => {});
 		budget.enqueueTransmit(1, "TX1");
 		budget.enqueueTransmit(2, "TX2");
+		expect([...budget.takeTransmits()]).toEqual(["TX1", "TX2"]);
 		expect(budget.shouldTransmit(1)).toBe(false);
 
 		expect([...budget.takeAllTransmittedIds()]).toEqual([1, 2]);
@@ -759,6 +913,7 @@ describe("ImageBudget transmit tracking", () => {
 	it("re-transmits an image after a purge frees its data", () => {
 		const budget = new ImageBudget(2, () => {});
 		budget.enqueueTransmit(1, "TX1");
+		expect([...budget.takeTransmits()]).toEqual(["TX1"]);
 		expect(budget.shouldTransmit(1)).toBe(false);
 
 		// Push past the cap so the oldest image (id 1) is demoted and purged.
@@ -768,5 +923,38 @@ describe("ImageBudget transmit tracking", () => {
 
 		// d=I freed the data, so the image must transmit again if it returns.
 		expect(budget.shouldTransmit(1)).toBe(true);
+	});
+
+	it("includes released ids queued for purge before they are drained", () => {
+		const budget = new ImageBudget(3, () => {});
+		const id = budget.acquireId("released");
+
+		budget.enqueueTransmit(id, "TX");
+		expect([...budget.takeTransmits()]).toEqual(["TX"]);
+		expect(budget.release("released")).toBe(true);
+
+		// The purge id has not been drained yet; shutdown cleanup must still delete it.
+		expect([...budget.takeAllTransmittedIds()]).toEqual([id]);
+		expect([...budget.takeAllTransmittedIds()]).toEqual([]);
+		expect(budget.shouldTransmit(id)).toBe(true);
+		expect(budget.acquireId("released")).not.toBe(id);
+	});
+
+	it("deduplicates ids that appear in both transmitted and purge sets", () => {
+		const budget = new ImageBudget(3, () => {});
+		const id = budget.acquireId("overlap");
+
+		budget.enqueueTransmit(id, "TX1");
+		expect([...budget.takeTransmits()]).toEqual(["TX1"]);
+		expect(budget.release("overlap")).toBe(true);
+
+		// Re-enqueue the same numeric id before the purge is drained: the id is now
+		// queued for purge and pending for re-transmission.
+		budget.enqueueTransmit(id, "TX2");
+		expect([...budget.takeTransmits()]).toEqual(["TX2"]);
+
+		expect([...budget.takeAllTransmittedIds()]).toEqual([id]);
+		expect([...budget.takeAllTransmittedIds()]).toEqual([]);
+		expect(budget.acquireId("overlap")).not.toBe(id);
 	});
 });

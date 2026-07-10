@@ -7,13 +7,24 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import type { InteractiveModeContext } from "../types";
 
+export type AssistantMessageContext = Pick<
+	InteractiveModeContext,
+	"effectiveHideThinkingBlock" | "proseOnlyThinking"
+> & {
+	settings: Pick<InteractiveModeContext["settings"], "get">;
+	ui: Pick<InteractiveModeContext["ui"], "imageBudget" | "requestRender">;
+	viewSession: {
+		extensionRunner: InteractiveModeContext["viewSession"]["extensionRunner"];
+	};
+};
+
 /**
  * Construct an {@link AssistantMessageComponent} wired to the live context's
  * thinking/image settings. `message` is omitted for the streaming placeholder
  * component and supplied when rendering a persisted turn.
  */
 export function createAssistantMessageComponent(
-	ctx: InteractiveModeContext,
+	ctx: AssistantMessageContext,
 	message?: AssistantMessage,
 ): AssistantMessageComponent {
 	return new AssistantMessageComponent(
@@ -23,6 +34,6 @@ export function createAssistantMessageComponent(
 		ctx.viewSession.extensionRunner?.getAssistantThinkingRenderers(),
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
-		ctx.settings.get("terminal.showImages"),
+		() => ctx.settings.get("terminal.showImages"),
 	);
 }

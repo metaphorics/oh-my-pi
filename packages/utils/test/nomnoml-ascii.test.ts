@@ -129,6 +129,63 @@ describe("renderNomnomlAsciiSafe", () => {
 			{ x: 7, y: 14, ch: "v" },
 		]);
 	});
+
+	for (const [source, decorator] of [
+		["[A] +-> [B]", "♦"],
+		["[A] o-> [B]", "◇"],
+		["[A] <:- [B]", "△"],
+	] as const) {
+		it(`renders the ${decorator} endpoint decorator on a direct connector`, () => {
+			const rendered = stripDiagram(renderNomnomlAsciiSafe(source, 80));
+			expect(rendered).toContain(decorator);
+			expect(rendered).toContain("A");
+			expect(rendered).toContain("B");
+		});
+	}
+
+	it("retains distinct endpoint decorators on bent connectors", () => {
+		const rendered = stripDiagram(renderNomnomlAsciiSafe("[Start] +-> [Mid]\n[Mid] -> [End]\n[Start] o-> [End]", 80));
+		expect(rendered).toContain("♦");
+		expect(rendered).toContain("◇");
+		expect(rendered.match(/[>v<^]/g)?.length).toBeGreaterThanOrEqual(3);
+	});
+
+	it("renders supported socket decorators without exposing their literal source", () => {
+		for (const [source, decorator] of [
+			["[A] (- [B]", "⌢"],
+			["[A] (o- [B]", "⊙"],
+			["[A] o<- [B]", "⊚"],
+		] as const) {
+			const rendered = stripDiagram(renderNomnomlAsciiSafe(source, 80));
+			expect(rendered).toContain(decorator);
+			expect(rendered).not.toContain(source);
+		}
+	});
+
+	it("does not leak hidden classifier source while rendering its visible connector decorator", () => {
+		const source = "[<hidden> secret] +-> [Visible]";
+		const rendered = stripDiagram(renderNomnomlAsciiSafe(source, 80));
+		expect(rendered).toContain("♦");
+		expect(rendered).toContain("Visible");
+		expect(rendered).not.toContain("secret");
+		expect(rendered).not.toContain("hidden");
+		expect(rendered).not.toContain(source);
+	});
+
+	for (const [description, source] of [
+		["later wider compartment", "[User|veryLongFieldName]"],
+		["earlier wider compartment", "[veryLongClassName|x]"],
+		["nested later content", "[Outer|[Inner|veryLongNestedField]]"],
+	] as const) {
+		it(`spans the final interior width for ${description}`, () => {
+			const rows = stripDiagram(renderNomnomlAsciiSafe(source, 80)).split("\n");
+			const topBorder = rows.find(row => /^┌─+┐$/.test(row));
+			const divider = rows.find(row => /^│─+│$/.test(row));
+			expect(topBorder).toBeDefined();
+			expect(divider).toBeDefined();
+			expect(Bun.stringWidth(divider ?? "")).toBe(Bun.stringWidth(topBorder ?? ""));
+		});
+	}
 	it("does not draw layout-only hidden association connectors", () => {
 		const rendered = stripDiagram(renderNomnomlAsciiSafe("#direction: right\n[A] -/- [B]", 80));
 		expect(rendered).toContain("A");
