@@ -1568,7 +1568,8 @@ export class Markdown implements Component {
 
 				if (token.lang === "nomnoml" && this.#theme.resolveNomnomlAscii) {
 					const ascii = this.#theme.resolveNomnomlAscii(token.text, width);
-					if (ascii) {
+					// Empty string is a successful all-hidden/blank render; only null falls back.
+					if (ascii !== null) {
 						for (const asciiLine of ascii.split("\n")) {
 							lines.push(
 								visibleWidth(asciiLine) > width ? truncateToWidth(asciiLine, width, Ellipsis.Omit) : asciiLine,

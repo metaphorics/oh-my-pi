@@ -13,6 +13,7 @@ type LayoutPart = {
 };
 type LayoutNode = LayoutPart & {
 	id?: string;
+	type?: string;
 	parts?: LayoutPart[];
 	dividers?: number[];
 };
@@ -31,6 +32,7 @@ type NomnomlConfig = {
 	edgeMargin?: number;
 	arrowSize?: number;
 	bendSize?: number;
+	styles?: Record<string, { visual?: string }>;
 };
 type ParsedNomnoml = { root: LayoutPart; config: NomnomlConfig };
 type Measurer = {
@@ -50,6 +52,7 @@ const nomnomlRuntime = nomnoml as NomnomlRuntime;
 const MAX_CANVAS_CELLS = 40_000;
 const MAX_DIMENSION = 400;
 const WIDE_CONTINUATION_CELL = "\0";
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 class CharGrid {
 	#cells: string[][];
@@ -84,9 +87,9 @@ class CharGrid {
 
 	text(x: number, y: number, text: string): void {
 		let cursor = x;
-		for (const char of text) {
-			this.set(cursor, y, char);
-			cursor += Bun.stringWidth(char) || 1;
+		for (const { segment } of graphemeSegmenter.segment(text)) {
+			this.set(cursor, y, segment);
+			cursor += Bun.stringWidth(segment) || 1;
 		}
 	}
 
@@ -164,7 +167,7 @@ function compactConfig(config: NomnomlConfig, direction?: "TB" | "LR"): NomnomlC
 	};
 }
 
-function layout(source: string, direction?: "TB" | "LR"): LayoutPart | null {
+function layout(source: string, direction?: "TB" | "LR"): ParsedNomnoml | null {
 	const parsed = nomnomlRuntime.parse(source);
 	parsed.config = compactConfig(parsed.config, direction);
 	const measurer: Measurer = {
@@ -173,17 +176,23 @@ function layout(source: string, direction?: "TB" | "LR"): LayoutPart | null {
 		textHeight: () => 1,
 	};
 	nomnomlRuntime.layout(measurer, parsed.config, parsed.root);
-	return parsed.root;
+	return parsed;
 }
 
-function collectNodeRows(node: LayoutNode, depth = 0): string[] {
+function isHidden(node: LayoutNode, config: NomnomlConfig): boolean {
+	return config.styles?.[node.type ?? "class"]?.visual === "hidden";
+}
+
+function collectNodeRows(node: LayoutNode, config: NomnomlConfig, depth = 0): string[] {
 	const rows: string[] = [];
 	const parts = node.parts ?? [];
 	for (const part of parts) {
 		for (const line of part.lines ?? []) rows.push(line);
 		const children = part.nodes ?? [];
 		if (children.length > 0) {
-			for (const child of children) rows.push(...collectNodeRows(child, depth + 1));
+			for (const child of children) {
+				if (!isHidden(child, config)) rows.push(...collectNodeRows(child, config, depth + 1));
+			}
 		}
 		if (depth === 0 && rows.length > 0 && part !== parts[parts.length - 1])
 			rows.push("─".repeat(Math.max(1, nodeWidth(rows))));
@@ -198,8 +207,8 @@ function nodeWidth(rows: string[]): number {
 	return width;
 }
 
-function drawNode(grid: CharGrid, node: LayoutNode): void {
-	const rows = collectNodeRows(node);
+function drawNode(grid: CharGrid, node: LayoutNode, config: NomnomlConfig): void {
+	const rows = collectNodeRows(node, config);
 	const contentWidth = nodeWidth(rows);
 	const width = Math.max(3, Math.ceil(node.width ?? contentWidth + 2));
 	const height = Math.max(3, Math.ceil(node.height ?? rows.length + 2));
@@ -275,6 +284,7 @@ function drawSegment(grid: CharGrid, start: Point, end: Point): void {
 }
 
 function drawArrow(grid: CharGrid, points: Point[], atStart: boolean): void {
+	// path = [sourceNode, ...edge.points, targetNode]; marker at path[1]/path[length-2]
 	const arrowPoint = atStart ? points[1] : points[points.length - 2];
 	const towardPoint = atStart ? points[0] : points[points.length - 1];
 	if (!arrowPoint || !towardPoint) return;
@@ -299,21 +309,25 @@ function asciiDisplayWidth(ascii: string): number {
 	return max;
 }
 
-function renderLayout(root: LayoutPart): string | null {
+function renderLayout(root: LayoutPart, config: NomnomlConfig): string | null {
 	const width = Math.max(1, Math.ceil(root.width ?? 0) + 2);
 	const height = Math.max(1, Math.ceil(root.height ?? 0) + 2);
 	if (width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_CANVAS_CELLS) return null;
 	const grid = new CharGrid(width, height);
 	for (const assoc of root.assocs ?? []) drawAssociationLines(grid, assoc);
-	for (const node of root.nodes ?? []) drawNode(grid, node);
+	for (const node of root.nodes ?? []) {
+		if (!isHidden(node, config)) drawNode(grid, node, config);
+	}
 	for (const assoc of root.assocs ?? []) drawAssociationDecorations(grid, assoc);
 	const lines = grid.lines();
-	return lines.length === 0 ? null : lines.join("\n");
+	// Empty string = valid layout with nothing visible (e.g. all-hidden nodes).
+	// null is reserved for parse/layout/oversized failure so Markdown can fall back.
+	return lines.join("\n");
 }
 
 function renderVariant(source: string, direction?: "TB" | "LR"): string | null {
-	const root = layout(source, direction);
-	return root ? renderLayout(root) : null;
+	const parsed = layout(source, direction);
+	return parsed ? renderLayout(parsed.root, parsed.config) : null;
 }
 
 export function renderNomnomlAsciiSafe(source: string, maxWidth = 120): string | null {

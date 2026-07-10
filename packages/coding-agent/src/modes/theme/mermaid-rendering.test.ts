@@ -4,6 +4,8 @@ import { ImageBudget, ImageProtocol, Markdown, setTerminalImageProtocol, TERMINA
 import { Settings } from "../../config/settings";
 import { buildSystemPrompt } from "../../system-prompt";
 import { AssistantMessageComponent } from "../components/assistant-message";
+import type { InteractiveModeContext } from "../types";
+import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
 import * as nomnomlCache from "./nomnoml-cache";
 import {
 	getMarkdownTheme,
@@ -130,6 +132,29 @@ describe("Mermaid rendering setting", () => {
 		expect(mermaid).toContain("```mermaid");
 		expect(mermaid).toContain("graph TD");
 	});
+
+	for (const [style, source] of [
+		["built-in", "[<hidden> secret]"],
+		["custom", "#.ghost: visual=hidden\n[<ghost> secret]"],
+	] as const) {
+		it(`replaces all-hidden ${style} nomnoml fences without leaking source`, () => {
+			setMarkdownNomnomlRendering("ascii");
+
+			const theme = getMarkdownTheme();
+			const ascii = theme.resolveNomnomlAscii?.(source, 80);
+			expect(ascii).toBe("");
+			expect(ascii).not.toBeNull();
+
+			const rendered = stripAnsi(
+				new Markdown(`\`\`\`nomnoml\n${source}\n\`\`\``, 0, 0, theme).render(80).join("\n"),
+			);
+			expect(rendered).not.toContain("secret");
+			expect(rendered).not.toContain("```nomnoml");
+			expect(rendered).not.toContain("```");
+			expect(rendered).not.toContain("[<hidden>");
+			expect(rendered).not.toContain("visual=hidden");
+		});
+	}
 });
 
 describe("Nomnoml SVG assistant rendering", () => {
@@ -236,6 +261,36 @@ describe("Nomnoml SVG assistant rendering", () => {
 		await Promise.resolve();
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rasterSpy).not.toHaveBeenCalled();
+		expect(budget.keys).toHaveLength(0);
+		expect(rendered).toContain("A");
+		expect(rendered).toContain("B");
+		expect(rendered).not.toContain("[Image:");
+	});
+
+	it("propagates terminal.showImages through the live assistant helper", async () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const rasterResult = Promise.withResolvers<string>();
+		const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockReturnValue(rasterResult.promise);
+		const budget = new RecordingImageBudget(10);
+		const requestRender = vi.fn();
+		const ctx = {
+			effectiveHideThinkingBlock: false,
+			proseOnlyThinking: true,
+			settings: Settings.isolated({ "terminal.showImages": false }),
+			ui: { imageBudget: budget, requestRender },
+			viewSession: { extensionRunner: undefined },
+		} as unknown as InteractiveModeContext;
+		const fence = "```nomnoml\n[A] -> [B]\n```";
+		const component = createAssistantMessageComponent(ctx, createAssistantMessage(fence));
+
+		rasterResult.resolve(TINY_PNG);
+		await rasterResult.promise;
+		await Promise.resolve();
+		const rendered = stripAnsi(component.render(120).join("\n"));
+
+		expect(rasterSpy).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
 		expect(budget.keys).toHaveLength(0);
 		expect(rendered).toContain("A");
 		expect(rendered).toContain("B");

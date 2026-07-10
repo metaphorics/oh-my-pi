@@ -719,6 +719,47 @@ more text`,
 		});
 	});
 
+	describe("Nomnoml fenced blocks", () => {
+		const renderNomnomlLines = (text: string, resolveNomnomlAscii: (source: string) => string | null) => {
+			const markdown = new Markdown(text, 0, 0, { ...defaultMarkdownTheme, resolveNomnomlAscii });
+
+			return markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+		};
+
+		it("treats empty-string resolver output as success and does not leak the fence or source", () => {
+			const fencedNomnoml = "```nomnoml\n[<hidden> secret]\n```";
+			const nomnomlSource = "[<hidden> secret]";
+			const seenSources: string[] = [];
+
+			const plainLines = renderNomnomlLines(fencedNomnoml, source => {
+				seenSources.push(source);
+				return source === nomnomlSource ? "" : null;
+			});
+
+			expect(seenSources).toEqual([nomnomlSource]);
+			// Empty successful render may leave a blank line; never the fence or source.
+			expect(plainLines.some(line => line.includes("```nomnoml"))).toBeFalsy();
+			expect(plainLines.some(line => line.includes("```"))).toBeFalsy();
+			expect(plainLines.some(line => line.includes("secret"))).toBeFalsy();
+			expect(plainLines.some(line => line.includes("[<hidden>"))).toBeFalsy();
+			expect(plainLines.every(line => line.trim() === "")).toBeTruthy();
+		});
+
+		it("falls back to the original fenced code block when nomnoml resolution returns null", () => {
+			const invalidNomnoml = "```nomnoml\n[A\n```";
+			const invalidSource = "[A";
+			const seenSources: string[] = [];
+
+			const plainLines = renderNomnomlLines(invalidNomnoml, source => {
+				seenSources.push(source);
+				return null;
+			});
+
+			expect(seenSources).toEqual([invalidSource]);
+			expect(plainLines).toEqual(["```nomnoml", "  [A", "```"]);
+		});
+	});
+
 	describe("Spacing after dividers", () => {
 		it("should have only one blank line between divider and following paragraph", () => {
 			const markdown = new Markdown(
