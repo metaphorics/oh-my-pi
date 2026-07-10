@@ -371,6 +371,51 @@ describe("Image budget integration", () => {
 		expect([...budget.takeTransmits()]).toEqual([]);
 	});
 
+	it("restores keyed image ownership so release purges the retransmitted id exactly once", () => {
+		const requestRender = vi.fn();
+		const budget = new ImageBudget(2, requestRender);
+		const makeImage = (key: string) =>
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: text => text },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: key },
+			);
+		const oldest = makeImage("oldest");
+		const middle = makeImage("middle");
+		const newest = makeImage("newest");
+		const renderPass = (images: Image[]) => {
+			budget.beginPass();
+			for (const image of images) image.render(20);
+			return budget.endPass();
+		};
+
+		renderPass([oldest, middle]);
+		const initialId = budget.acquireId("oldest");
+		expect(budget.takeTransmits()).toHaveLength(2);
+
+		renderPass([oldest, middle, newest]);
+		expect(renderPass([oldest, middle, newest])).toBe(true);
+		expect(budget.takePurgeIds()).toEqual([initialId]);
+		expect(budget.takeTransmits()).toHaveLength(1);
+		const competingId = budget.acquireId("oldest");
+		expect(competingId).not.toBe(initialId);
+
+		renderPass([oldest, middle]);
+		renderPass([oldest, middle]);
+		const restoredId = budget.acquireId("oldest");
+		expect(restoredId).toBe(competingId);
+		const restoredTransmits = budget.takeTransmits();
+		expect(restoredTransmits).toHaveLength(1);
+		expect(restoredTransmits[0]).toContain(`i=${restoredId}`);
+
+		expect(budget.release("oldest")).toBe(true);
+		expect(budget.release("oldest")).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([restoredId]);
+		expect(budget.takePurgeIds()).toEqual([]);
+		expect(budget.acquireId("oldest")).not.toBe(restoredId);
+	});
+
 	it("moves back up before multi-row direct Kitty placements and restores the cursor below them", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id = budget.acquireId("k");

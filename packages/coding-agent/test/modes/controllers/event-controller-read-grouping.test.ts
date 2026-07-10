@@ -15,12 +15,13 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { Container } from "@oh-my-pi/pi-tui";
+import { Container, ImageBudget, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
 	await initTheme(false, undefined, undefined, "dark", "light");
@@ -66,15 +67,16 @@ function assistantMessage(content: Block[]): AssistantMessage {
 	};
 }
 
-function createFixture() {
+function createFixture(imageBudget?: ImageBudget) {
 	const chatContainer = new Container();
+	const requestRender = vi.fn();
 	const sessionMock = { getToolByName: () => undefined, extensionRunner: undefined };
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
 		statusLine: { invalidate: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn(), imageBudget: undefined },
+		ui: { requestRender, imageBudget },
 		chatContainer,
 		pendingTools: new Map(),
 		noteDisplayableThinkingContent: vi.fn(() => false),
@@ -86,7 +88,7 @@ function createFixture() {
 		session: sessionMock,
 		viewSession: sessionMock,
 	} as unknown as InteractiveModeContext;
-	return { controller: new EventController(ctx), chatContainer };
+	return { controller: new EventController(ctx), chatContainer, ctx, requestRender };
 }
 
 /** Drive one assistant completion: message_start then a single full message_update. */
@@ -154,5 +156,36 @@ describe("EventController read-group accretion", () => {
 		// A visible-reasoning completion breaks the run and finalizes the prior group.
 		await streamCompletion(controller, [thinking("done exploring"), read("b.ts:1-50")]);
 		expect(group!.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("drops a late read image result after its assistant owner is disposed", async () => {
+		const originalProtocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		Settings.instance.override("terminal.showImages", true);
+		const budget = new ImageBudget(10, vi.fn());
+		const acquireSpy = vi.spyOn(budget, "acquireId");
+		const toBase64Spy = vi.spyOn(Bun.Image.prototype, "toBase64");
+		const { controller, ctx } = createFixture(budget);
+
+		try {
+			await streamCompletion(controller, [read("late.webp")]);
+			const owner = ctx.streamingComponent;
+			if (!(owner instanceof AssistantMessageComponent)) throw new Error("Expected assistant image owner");
+			owner.dispose();
+
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "read-late.webp",
+				toolName: "read",
+				isError: false,
+				result: { content: [{ type: "image", data: "not-decoded", mimeType: "image/webp" }] },
+			} as AgentSessionEvent);
+			await Promise.resolve();
+
+			expect(toBase64Spy).not.toHaveBeenCalled();
+			expect(acquireSpy).not.toHaveBeenCalled();
+		} finally {
+			setTerminalImageProtocol(originalProtocol);
+		}
 	});
 });

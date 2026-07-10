@@ -94,6 +94,7 @@ function nomnomlImageKey(rasterKey: string, placementScope: string, occurrence: 
 function findTopLevelNomnomlBlocks(text: string): TopLevelNomnomlBlock[] {
 	const blocks: TopLevelNomnomlBlock[] = [];
 	let fence: { marker: string; start: number; contentStart: number; nomnoml: boolean } | undefined;
+	const listIndents: number[] = [];
 	let offset = 0;
 	for (const rawLine of text.split(/(?<=\n)/)) {
 		if (rawLine.length === 0) continue;
@@ -123,7 +124,20 @@ function findTopLevelNomnomlBlocks(text: string): TopLevelNomnomlBlock[] {
 			}
 			continue;
 		}
-		if (fenceMatch) {
+
+		const listItem = /^( *)(?:[-+*]|\d{1,9}[.)])([ \t]+)/.exec(line);
+		if (listItem) {
+			const markerIndent = listItem[1]?.length ?? 0;
+			while (listIndents.length > 0 && (listIndents.at(-1) ?? 0) >= markerIndent) listIndents.pop();
+			listIndents.push(markerIndent);
+			continue;
+		}
+		const indent = /^ */.exec(line)?.[0].length ?? 0;
+		if (line.trim() !== "") {
+			while (listIndents.length > 0 && (listIndents.at(-1) ?? 0) >= indent) listIndents.pop();
+		}
+		const nestedInList = listIndents.length > 0;
+		if (fenceMatch && !nestedInList) {
 			const marker = fenceMatch[1] ?? "";
 			const info = fenceMatch[2] ?? "";
 			fence = {
@@ -624,7 +638,7 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	setToolResultImages(toolCallId: string, images: ImageContent[]): void {
-		if (!toolCallId) return;
+		if (this.#disposed || !toolCallId) return;
 		const validImages = images.filter(img => img.type === "image" && img.data && img.mimeType);
 		const keyPrefix = this.#toolImageKeyPrefix(toolCallId);
 		for (const key of Array.from(this.#convertedKittyImages.keys())) {
@@ -668,8 +682,8 @@ export class AssistantMessageComponent extends Container {
 				.png()
 				.toBase64()
 				.then(data => {
-					if (this.#disposed) return;
 					this.#kittyConversionsInFlight.delete(key);
+					if (this.#disposed) return;
 					this.#convertedKittyImages.set(key, {
 						type: "image",
 						data,

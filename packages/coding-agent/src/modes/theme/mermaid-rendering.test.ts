@@ -207,6 +207,51 @@ describe("Nomnoml SVG assistant rendering", () => {
 		expect(rendered).toContain("```nomnoml");
 	});
 
+	for (const [kind, marker] of [
+		["unordered", "- item"],
+		["ordered", "10. item"],
+	] as const) {
+		for (const indent of [2, 4] as const) {
+			it(`keeps ${indent}-space nomnoml fences inside ${kind} list items`, () => {
+				setMarkdownNomnomlRendering("svg");
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+				const padding = " ".repeat(indent);
+				const markdown = `${marker}\n${padding}\`\`\`nomnoml\n${padding}[A] -> [B]\n${padding}\`\`\`\n${padding}continuation\n- following item`;
+
+				const component = new AssistantMessageComponent(createAssistantMessage(markdown));
+				const rendered = stripAnsi(component.render(120).join("\n"));
+
+				expect(rasterSpy).not.toHaveBeenCalled();
+				expect(rendered).toContain("continuation");
+				expect(rendered).toContain("following item");
+			});
+		}
+	}
+
+	it("keeps a fence in its parent list item after a nested child item", () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+		const markdown = "- parent\n  - child\n  ```nomnoml\n  [A] -> [B]\n  ```\n  parent continuation";
+
+		const component = new AssistantMessageComponent(createAssistantMessage(markdown));
+		const rendered = stripAnsi(component.render(120).join("\n"));
+
+		expect(rasterSpy).not.toHaveBeenCalled();
+		expect(rendered).toContain("parent continuation");
+	});
+
+	it("still rasterizes a top-level nomnoml fence after a list", () => {
+		setMarkdownNomnomlRendering("svg");
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const rasterSpy = spyOn(nomnomlCache, "resolveNomnomlPng").mockResolvedValue(TINY_PNG);
+
+		new AssistantMessageComponent(createAssistantMessage("- item\n\n```nomnoml\n[A] -> [B]\n```"));
+
+		expect(rasterSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("uses unique image placement keys for repeated nomnoml sources", async () => {
 		setMarkdownNomnomlRendering("svg");
 		setTerminalImageProtocol(ImageProtocol.Kitty);
@@ -555,6 +600,27 @@ describe("Nomnoml SVG assistant rendering", () => {
 });
 
 describe("AssistantMessageComponent async disposal", () => {
+	it("ignores tool-result images delivered by an owner after disposal", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const toBase64Spy = spyOn(Bun.Image.prototype, "toBase64");
+		const budget = new RecordingImageBudget(10);
+		const requestRender = vi.fn();
+		const ctx = createLiveContext(true, budget, requestRender);
+		const component = createAssistantMessageComponent(ctx, createAssistantMessage("done"));
+		component.dispose();
+		const contentContainer = component.children[1];
+		if (!(contentContainer instanceof Container)) throw new Error("Expected content container");
+		const childrenAfterDispose = contentContainer.children.slice();
+
+		component.setToolResultImages("late-read", [{ type: "image", data: TINY_PNG, mimeType: "image/jpeg" }]);
+		await Promise.resolve();
+
+		expect(toBase64Spy).not.toHaveBeenCalled();
+		expect(budget.keys).toEqual([]);
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(contentContainer.children).toEqual(childrenAfterDispose);
+	});
+
 	it("does not resurrect a Nomnoml image after dispose while raster is pending", async () => {
 		setMarkdownNomnomlRendering("svg");
 		setTerminalImageProtocol(ImageProtocol.Kitty);

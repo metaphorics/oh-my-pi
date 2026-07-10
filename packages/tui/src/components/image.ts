@@ -146,6 +146,26 @@ export class ImageBudget {
 		return id;
 	}
 
+	/** Rebind a demoted keyed image to its retained id without stealing another owner's key. */
+	restoreOwnership(key: string, id: number): number {
+		const ownedId = this.#keyToId.get(key);
+		let restoredId: number;
+		if (ownedId !== undefined) {
+			restoredId = ownedId;
+		} else if (this.#idToKey.has(id)) {
+			restoredId = this.acquireId(key);
+		} else {
+			this.#keyToId.set(key, id);
+			this.#idToKey.set(id, key);
+			restoredId = id;
+		}
+		const lastIndex = this.#passIds.length - 1;
+		if (!this.#stablePass && lastIndex >= 0 && this.#passIds[lastIndex] === id) {
+			this.#passIds[lastIndex] = restoredId;
+		}
+		return restoredId;
+	}
+
 	/**
 	 * Release one stable logical image key. The key is forgotten immediately so
 	 * a later component gets a fresh graphics id. If that id was transmitted,
@@ -403,6 +423,15 @@ export class Image implements Component {
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		if (
+			!suppressed &&
+			this.#cachedSuppressed &&
+			this.#budget !== undefined &&
+			this.#imageId !== undefined &&
+			this.#options.imageKey
+		) {
+			this.#imageId = this.#budget.restoreOwnership(this.#options.imageKey, this.#imageId);
+		}
 
 		if (
 			this.#cachedLines &&
