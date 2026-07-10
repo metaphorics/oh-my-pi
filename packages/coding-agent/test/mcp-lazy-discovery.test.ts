@@ -1183,6 +1183,120 @@ describe("lazy MCP discovery (T6)", () => {
 		}
 	});
 
+	it("search and on-demand waiters join one reconnect with isolated aborts and tool readiness", async () => {
+		writeProjectMcpConfig(workDir);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		const connectionReady = Promise.withResolvers<void>();
+		const listToolsStarted = Promise.withResolvers<void>();
+		const toolLoad = Promise.withResolvers<MCPToolDefinition[]>();
+		try {
+			await manager.discoverDeferred();
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) => {
+				await connectionReady.promise;
+				return mockConnectionFor(name, config);
+			});
+			listToolsSpy.mockImplementation(() => {
+				listToolsStarted.resolve();
+				return toolLoad.promise;
+			});
+
+			const reconnect = manager.reconnectServer(DEFERRED_SERVER);
+			await Promise.resolve();
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+
+			const controller = new AbortController();
+			const aborted = manager.connectServerOnDemand(DEFERRED_SERVER, controller.signal).then(
+				() => undefined,
+				error => error,
+			);
+			const session = createBm25Session(manager, {
+				discoverableTools: manager
+					.getDeferredDiscoverableTools()
+					.filter(tool => tool.serverName === DEFERRED_SERVER),
+			});
+			const search = new SearchToolBm25Tool(session).execute("join-reconnect", {
+				query: "Deferred wiki server",
+				limit: 5,
+			});
+			await Promise.resolve();
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+
+			controller.abort();
+			expect(await aborted).toMatchObject({ name: "AbortError" });
+			connectionReady.resolve();
+			await listToolsStarted.promise;
+			expect(listToolsSpy).toHaveBeenCalledTimes(1);
+			let searchSettled = false;
+			void search.finally(() => {
+				searchSettled = true;
+			});
+			await Promise.resolve();
+			expect(searchSettled).toBe(false);
+
+			toolLoad.resolve([LIVE_TOOL_DEF]);
+			const [reconnected, result] = await Promise.all([reconnect, search]);
+			expect(reconnected).toBeDefined();
+			expect(result.details?.activated_tools).toContain(`mcp__${DEFERRED_SERVER}_lookup_docs`);
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(listToolsSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			connectionReady.resolve();
+			toolLoad.resolve([LIVE_TOOL_DEF]);
+			await manager.disconnectAll();
+		}
+	});
+
+	it("a joined reconnect failure is observable and a later on-demand retry connects once", async () => {
+		writeProjectMcpConfig(workDir);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		const rejectReconnect = Promise.withResolvers<void>();
+		const retryConnectionReady = Promise.withResolvers<void>();
+		const reconnectError = new Error("reconnect transport failed");
+		try {
+			await manager.discoverDeferred();
+			connectSpy.mockImplementationOnce(async () => {
+				await rejectReconnect.promise;
+				throw reconnectError;
+			});
+			listToolsSpy.mockResolvedValue([LIVE_TOOL_DEF]);
+
+			const reconnect = manager.reconnectServer(DEFERRED_SERVER);
+			await Promise.resolve();
+			const joined = manager.connectServerOnDemand(DEFERRED_SERVER).then(
+				() => undefined,
+				error => error,
+			);
+			// Invalidate the configuration epoch while the transport attempt is latched.
+			// Its rejection then terminates the shared reconnect without wall-clock backoff.
+			await manager.disconnectAll();
+			rejectReconnect.resolve();
+
+			expect(await reconnect).toBeNull();
+			expect(await joined).toMatchObject({ message: `MCP server failed to reconnect: ${DEFERRED_SERVER}` });
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(manager.getConnection(DEFERRED_SERVER)).toBeUndefined();
+
+			await manager.discoverDeferred();
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) => {
+				await retryConnectionReady.promise;
+				return mockConnectionFor(name, config);
+			});
+			const firstRetry = manager.connectServerOnDemand(DEFERRED_SERVER);
+			const secondRetry = manager.connectServerOnDemand(DEFERRED_SERVER);
+			await Promise.resolve();
+			expect(connectSpy).toHaveBeenCalledTimes(2);
+			retryConnectionReady.resolve();
+			await Promise.all([firstRetry, secondRetry]);
+			expect(connectSpy).toHaveBeenCalledTimes(2);
+			expect(listToolsSpy).toHaveBeenCalledTimes(1);
+			expect(manager.getTools().map(tool => tool.name)).toContain(`mcp__${DEFERRED_SERVER}_lookup_docs`);
+		} finally {
+			rejectReconnect.resolve();
+			retryConnectionReady.resolve();
+			await manager.disconnectAll();
+		}
+	});
+
 	it("MCP schema allows description on every concrete transport", () => {
 		for (const serverName of ["stdioServer", "httpServer", "sseServer"] as const) {
 			const transportSchema = mcpSchema.$defs[serverName].allOf.find(isClosedTransportSchema);
@@ -1714,6 +1828,78 @@ describe("lazy MCP discovery (T6)", () => {
 			expect(result.details?.activated_tools).toContain(liveToolName);
 			expect(result.details?.tools.map(match => match.name)).toContain(liveToolName);
 			expect(session.getSelectedMCPToolNames()).toContain(liveToolName);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("native user and project descriptions reach deferred prompts and BM25 without changing precedence", async () => {
+		const userAgentDir = getAgentDir();
+		const projectConfigDir = path.join(workDir, ".omp");
+		fs.mkdirSync(userAgentDir, { recursive: true });
+		fs.mkdirSync(projectConfigDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(userAgentDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					user_native: { command: "echo", description: "Celestial payroll records" },
+					shared_native: { command: "echo", description: "User shared description" },
+				},
+			}),
+		);
+		fs.writeFileSync(
+			path.join(projectConfigDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					project_native: { command: "echo", description: "Quantum issue tracker" },
+					shared_native: { command: "echo", description: "Project shared description" },
+					plain_native: { command: "echo" },
+				},
+			}),
+		);
+		clearFsCache();
+
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		try {
+			await manager.discoverDeferred();
+			const summaries = manager.getDiscoverableServerSummaries();
+			expect(summaries).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ name: "user_native", description: "Celestial payroll records" }),
+					expect.objectContaining({ name: "project_native", description: "Quantum issue tracker" }),
+					expect.objectContaining({ name: "shared_native", description: "Project shared description" }),
+					expect.objectContaining({ name: "plain_native", description: undefined }),
+				]),
+			);
+			expect(manager.getServerConfig("shared_native")?.description).toBe("Project shared description");
+
+			const pseudo = manager.getDeferredDiscoverableTools();
+			const plainPseudo = pseudo.find(tool => tool.serverName === "plain_native");
+			expect(plainPseudo?.summary).toBe(
+				'MCP server "plain_native" — tools not yet loaded; searching or calling loads them',
+			);
+			const promptDescription = renderSearchToolBm25Description(pseudo, summaries);
+			expect(promptDescription).toContain("user_native (deferred) — Celestial payroll records");
+			expect(promptDescription).toContain("project_native (deferred) — Quantum issue tracker");
+			expect(promptDescription).toContain("plain_native (deferred)");
+			expect(promptDescription).not.toContain("undefined");
+
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+				mockConnectionFor(name, config),
+			);
+			listToolsSpy.mockResolvedValue([
+				{ name: "search", description: "Run a query", inputSchema: { type: "object", properties: {} } },
+			]);
+			const session = createBm25Session(manager, { discoverableTools: pseudo });
+			const result = await new SearchToolBm25Tool(session).execute("native-description", {
+				query: "celestial payroll records",
+				limit: 5,
+			});
+
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(connectSpy.mock.calls[0]?.[0]).toBe("user_native");
+			expect(result.details?.activated_tools).toContain("mcp__user_native_search");
+			expect(result.details?.tools.map(match => match.name)).toContain("mcp__user_native_search");
 		} finally {
 			await manager.disconnectAll();
 		}

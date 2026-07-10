@@ -471,6 +471,14 @@ export class MCPManager {
 		throwIfAborted(signal);
 		const pending = this.#pendingOnDemandConnections.get(name);
 		if (pending) return waitForAbort(pending, signal);
+		const pendingReconnect = this.#pendingReconnections.get(name);
+		if (pendingReconnect) {
+			const reconnectReady = pendingReconnect.then(connection => {
+				if (connection) return;
+				throw new Error(this.#serverErrors.get(name) ?? `MCP server failed to reconnect: ${name}`);
+			});
+			return waitForAbort(this.#trackOnDemandReady(name, reconnectReady), signal);
+		}
 		const pendingToolLoad = this.#pendingToolLoads.get(name);
 		if (pendingToolLoad) return waitForAbort(this.#trackOnDemandReady(name, pendingToolLoad), signal);
 		if (this.#connections.has(name)) return;
@@ -1181,6 +1189,7 @@ export class MCPManager {
 			}
 			try {
 				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
+				this.#serverErrors.delete(name);
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
 				return connection;
 			} catch (error) {
@@ -1202,6 +1211,7 @@ export class MCPManager {
 					});
 					await Bun.sleep(delays[attempt]);
 				} else {
+					this.#serverErrors.set(name, msg);
 					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
 					// Don't remove stale tools — keep them in the registry so they
 					// remain selected. Calls will fail with MCP errors, which

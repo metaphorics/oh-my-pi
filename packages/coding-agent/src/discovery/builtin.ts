@@ -157,6 +157,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			result.push({
 				name: serverName,
 				enabled,
+				description: serverConfig.description as string | undefined,
 				timeout,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
