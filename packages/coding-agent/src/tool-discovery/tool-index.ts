@@ -18,6 +18,13 @@ export interface DiscoverableTool {
 	mcpToolName?: string;
 	/** MCP lazy-discovery pseudo-entry for a server whose tools are not loaded yet. */
 	deferredServer?: boolean;
+	/**
+	 * Configured MCP server description, carried as BM25 corpus-only metadata so a
+	 * live tool loaded from a cache-miss server that matched only by its server
+	 * description still ranks on the original query terms. Never surfaced as the
+	 * tool's own description/output.
+	 */
+	serverDescription?: string;
 	schemaKeys: string[];
 }
 
@@ -64,6 +71,10 @@ const FIELD_WEIGHTS = {
 	serverName: 2,
 	mcpToolName: 4,
 	summary: 2,
+	// Same weight as `summary`: the configured server description carries the
+	// identical descriptive signal that previously lived on the pseudo-entry, so
+	// moving it into the live corpus must neither amplify nor suppress ranking.
+	serverDescription: 2,
 	schemaKey: 1,
 } as const;
 
@@ -121,6 +132,7 @@ function buildSearchDocument(tool: DiscoverableTool): DiscoverableToolSearchDocu
 	addWeightedTokens(termFrequencies, tool.serverName, FIELD_WEIGHTS.serverName);
 	addWeightedTokens(termFrequencies, tool.mcpToolName, FIELD_WEIGHTS.mcpToolName);
 	addWeightedTokens(termFrequencies, tool.summary, FIELD_WEIGHTS.summary);
+	addWeightedTokens(termFrequencies, tool.serverDescription, FIELD_WEIGHTS.serverDescription);
 	for (const schemaKey of tool.schemaKeys) {
 		addWeightedTokens(termFrequencies, schemaKey, FIELD_WEIGHTS.schemaKey);
 	}

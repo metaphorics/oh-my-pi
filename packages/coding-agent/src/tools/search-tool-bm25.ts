@@ -89,6 +89,29 @@ function getDiscoverableToolsForDescription(session: ToolSession): DiscoverableT
 	}
 }
 
+/**
+ * Enrich live MCP descriptors with their configured server description as
+ * BM25 corpus-only ranking metadata. Once a cache-miss server connects its
+ * pseudo-entry (which carried the server description in its summary) is hidden,
+ * so without this a generic live tool like `search` loses the description
+ * signal that let the server match the query. `getServerConfig` is concrete
+ * like the discovery accessor above, so no extra try/catch is needed; skip
+ * tools with no resolvable, non-blank description and clone only where the
+ * signal exists.
+ */
+function withServerDescriptions(session: ToolSession, tools: DiscoverableTool[]): DiscoverableTool[] {
+	const manager = session.mcpManager;
+	if (!manager) return tools;
+	return tools.map(tool => {
+		if (tool.source !== "mcp" || tool.deferredServer || typeof tool.serverName !== "string") {
+			return tool;
+		}
+		const description = manager.getServerConfig(tool.serverName)?.description?.slice(0, 200);
+		if (!description || description.trim().length === 0) return tool;
+		return { ...tool, serverDescription: description };
+	});
+}
+
 function getDiscoverableToolSearchIndexForExecution(session: ToolSession): DiscoverableToolSearchIndex {
 	try {
 		const cached = session.getDiscoverableToolSearchIndex?.();
@@ -318,7 +341,9 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		const unavailableServers = lazyConnections.unavailable;
 		const unavailableServerNames = lazyConnections.unavailableServerNames;
 		if (lazyConnections.attempted) {
-			searchIndex = buildDiscoverableToolSearchIndex(getDiscoverableToolsForDescription(this.session));
+			searchIndex = buildDiscoverableToolSearchIndex(
+				withServerDescriptions(this.session, getDiscoverableToolsForDescription(this.session)),
+			);
 			selectedToolNames = new Set(getSelectedToolNames(this.session));
 			ranked = searchDiscoverableTools(searchIndex, query, searchIndex.documents.length)
 				.filter(result => !selectedToolNames.has(result.tool.name))

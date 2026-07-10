@@ -1154,7 +1154,7 @@ export class MCPCommandController {
 			await addMCPServer(filePath, name, config);
 
 			// Reload MCP manager
-			await this.#reloadMCP();
+			await this.#reloadMCP(config.enabled === false ? undefined : name);
 			const state =
 				config.enabled === false
 					? "disconnected"
@@ -1778,7 +1778,7 @@ export class MCPCommandController {
 				});
 				await updateMCPServer(found.filePath, name, updated);
 			}
-			await this.#reloadMCP();
+			await this.#reloadMCP(name);
 			const state = await this.#waitForServerConnectionWithAnimation(name);
 
 			const lines = [
@@ -1897,17 +1897,32 @@ export class MCPCommandController {
 	/**
 	 * Reload MCP manager with new configs
 	 */
-	async #reloadMCP(): Promise<void> {
+	async #reloadMCP(targetServer?: string): Promise<void> {
 		if (!this.ctx.mcpManager) {
 			return;
 		}
+		const manager = this.ctx.mcpManager;
 
 		// Disconnect all existing servers
-		await this.ctx.mcpManager.disconnectAll();
+		await manager.disconnectAll();
 
-		// Rediscover and connect
-		const result = await this.ctx.mcpManager.discoverAndConnect();
-		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+		// Honor mcp.lazyDiscovery: a reload must not eagerly spawn every
+		// configured server. discoverDeferred re-reads config and re-exposes
+		// cached schemas + server pseudo-entries without connecting. A command
+		// that needs one server live (add/reauth) passes targetServer so only
+		// that server connects on demand; its failure folds into the same error
+		// map discoverAndConnect would have surfaced. Plain reload/remove/unauth
+		// pass no target, so lazy policy reconnects nothing they don't need.
+		const lazyDiscovery = this.ctx.settings.get("mcp.lazyDiscovery") === true;
+		const result = lazyDiscovery ? await manager.discoverDeferred() : await manager.discoverAndConnect();
+		if (lazyDiscovery && targetServer && manager.getServerConfig(targetServer)) {
+			try {
+				await manager.connectServerOnDemand(targetServer);
+			} catch (error) {
+				result.errors.set(targetServer, error instanceof Error ? error.message : String(error));
+			}
+		}
+		await this.ctx.session.refreshMCPTools(manager.getTools());
 
 		this.#showMCPConnectionErrors(result.errors);
 	}

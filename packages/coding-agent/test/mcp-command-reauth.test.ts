@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -41,7 +42,29 @@ function restoreEnvValue(name: string, value: string | undefined): void {
 	Bun.env[name] = value;
 	process.env[name] = value;
 }
-function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<string, unknown> = {}) {
+
+type Renderable = { render(width: number): readonly string[] };
+
+function isRenderable(value: unknown): value is Renderable {
+	return typeof value === "object" && value !== null && "render" in value && typeof value.render === "function";
+}
+
+function renderPresented(calls: readonly (readonly unknown[])[]): string {
+	const lines: string[] = [];
+	for (const [content] of calls) {
+		const components = Array.isArray(content) ? content : [content];
+		for (const component of components) {
+			if (isRenderable(component)) lines.push(...component.render(120));
+		}
+	}
+	return Bun.stripANSI(lines.join("\n"));
+}
+
+function createController(
+	authStorage: AuthStorage,
+	mcpManagerOverrides: Record<string, unknown> = {},
+	settings: Settings = Settings.isolated(),
+) {
 	const showError = vi.fn();
 	const showStatus = vi.fn();
 	const present = vi.fn();
@@ -51,6 +74,9 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 		prepareConfig,
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
+		discoverDeferred: vi.fn(async () => ({ errors: new Map<string, string>() })),
+		connectServerOnDemand: vi.fn(async (_name: string) => {}),
+		getServerConfig: vi.fn(() => undefined as MCPServerConfig | undefined),
 		getTools: vi.fn(() => []),
 		waitForConnection: vi.fn(async () => {}),
 		getConnectionStatus: vi.fn(() => "connected"),
@@ -72,6 +98,7 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 			refreshMCPTools: vi.fn(),
 			modelRegistry: { authStorage },
 		},
+		settings,
 		mcpManager,
 	} as never);
 
@@ -175,6 +202,83 @@ describe("/mcp auth commands", () => {
 		const savedUrl = savedServer?.type === "http" || savedServer?.type === "sse" ? savedServer.url : undefined;
 		expect(savedUrl).toBe(RAW_SERVER_URL);
 		expect(savedServer?.auth).toBeUndefined();
+	});
+
+	test("lazy reauth rediscovers deferred and connects only the target server", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const discoverDeferred = vi.fn(async () => ({
+			errors: new Map<string, string>(),
+			connectedServers: [] as string[],
+			tools: [],
+			exaApiKeys: [] as string[],
+		}));
+		const connectServerOnDemand = vi.fn(async (_name: string) => {});
+		const discoverAndConnect = vi.fn(async () => ({ errors: new Map<string, string>() }));
+		const { controller, showError } = createController(
+			authStorage,
+			{
+				discoverDeferred,
+				connectServerOnDemand,
+				discoverAndConnect,
+				// The just-reauthed server is configured after deferred rediscovery, so
+				// the targeted on-demand connect path is eligible.
+				getServerConfig: vi.fn((name: string) =>
+					name === "envserver" ? { type: "http", url: EXPANDED_SERVER_URL } : undefined,
+				),
+			},
+			Settings.isolated({ "mcp.lazyDiscovery": true }),
+		);
+
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		// Lazy policy: rediscover deferred (no eager fan-out), then connect only
+		// the reauthed target on demand.
+		expect(discoverDeferred).toHaveBeenCalledTimes(1);
+		expect(discoverAndConnect).not.toHaveBeenCalled();
+		expect(connectServerOnDemand).toHaveBeenCalledTimes(1);
+		expect(connectServerOnDemand.mock.calls[0]?.[0]).toBe("envserver");
+	});
+
+	test("lazy reauth surfaces a targeted connection rejection", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const connectError = new Error("targeted reauth connection failed");
+		const connectServerOnDemand = vi.fn(async () => {
+			throw connectError;
+		});
+		const { controller, present, mcpManager } = createController(
+			authStorage,
+			{
+				connectServerOnDemand,
+				getServerConfig: vi.fn((name: string) =>
+					name === "envserver" ? { type: "http", url: EXPANDED_SERVER_URL } : undefined,
+				),
+			},
+			Settings.isolated({ "mcp.lazyDiscovery": true }),
+		);
+
+		await controller.handle("/mcp reauth envserver");
+
+		expect(mcpManager.discoverDeferred).toHaveBeenCalledTimes(1);
+		expect(mcpManager.discoverAndConnect).not.toHaveBeenCalled();
+		expect(connectServerOnDemand).toHaveBeenCalledWith("envserver");
+		const output = renderPresented(present.mock.calls);
+		expect(output).toContain("Some servers failed to connect:");
+		expect(output).toContain("envserver: targeted reauth connection failed");
 	});
 
 	test("reuses embedded DCR client secret during reauth token exchange", async () => {
@@ -354,6 +458,34 @@ describe("/mcp auth commands", () => {
 		expect(savedServer?.auth).toBeUndefined();
 	});
 
+	test("lazy unauth rediscovers deferred without reconnecting any server", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		await authStorage.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
+			type: "oauth",
+			access: "expanded-access",
+			refresh: "expanded-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const { controller, mcpManager } = createController(
+			authStorage,
+			{
+				// If unauth accidentally passed a target, this config would make the
+				// targeted connection observable.
+				getServerConfig: vi.fn(() => ({ type: "http", url: EXPANDED_SERVER_URL })),
+			},
+			Settings.isolated({ "mcp.lazyDiscovery": true }),
+		);
+
+		await controller.handle("/mcp unauth envserver");
+
+		expect(mcpManager.disconnectAll).toHaveBeenCalledTimes(1);
+		expect(mcpManager.discoverDeferred).toHaveBeenCalledTimes(1);
+		expect(mcpManager.discoverAndConnect).not.toHaveBeenCalled();
+		expect(mcpManager.connectServerOnDemand).not.toHaveBeenCalled();
+		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
+	});
+
 	test("clears url-keyed auth for discovered definition-only servers", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();
@@ -363,14 +495,22 @@ describe("/mcp auth commands", () => {
 			refresh: "discovered-refresh",
 			expires: Date.now() + 3_600_000,
 		});
-		const { controller, showError } = createController(authStorage, {
-			getServerConfig: vi.fn(() => ({ type: "http", url: EXPANDED_SERVER_URL })),
-			getSource: vi.fn(() => ({ provider: "test", path: "/tmp/discovered.json" })),
-		});
+		const { controller, showError, mcpManager } = createController(
+			authStorage,
+			{
+				getServerConfig: vi.fn(() => ({ type: "http", url: EXPANDED_SERVER_URL })),
+				getSource: vi.fn(() => ({ provider: "test", path: "/tmp/discovered.json" })),
+			},
+			Settings.isolated({ "mcp.lazyDiscovery": true }),
+		);
 
 		await controller.handle("/mcp unauth discovered");
 
 		expect(showError).not.toHaveBeenCalled();
+		expect(mcpManager.disconnectAll).toHaveBeenCalledTimes(1);
+		expect(mcpManager.discoverDeferred).toHaveBeenCalledTimes(1);
+		expect(mcpManager.discoverAndConnect).not.toHaveBeenCalled();
+		expect(mcpManager.connectServerOnDemand).not.toHaveBeenCalled();
 		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
 		const userConfigPath = getMCPConfigPath("user", projectDir);
 		const userConfig = JSON.parse(

@@ -18,14 +18,17 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, mock, spyOn } f
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { createMCPServerToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
 import type { MCPServerConfig, MCPServerConnection, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -167,6 +170,37 @@ async function waitFor(predicate: () => boolean, message: string, timeoutMs = 1_
 	}
 }
 
+async function getCallableMCPToolOwner(cwd: string, tools: CustomTool[], toolName: string) {
+	const authStorage = await AuthStorage.create(path.join(cwd, `collision-owner-${Snowflake.next()}.db`));
+	const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, `collision-owner-${Snowflake.next()}.yml`));
+	try {
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: path.join(cwd, "agent"),
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			enableMCP: false,
+			hasUI: false,
+		});
+		try {
+			await session.refreshMCPTools(tools);
+			return (session.getToolByName(toolName) as { mcpServerName?: string } | undefined)?.mcpServerName;
+		} finally {
+			await session.dispose();
+		}
+	} finally {
+		authStorage.close();
+	}
+}
+
 type ClosedTransportSchema = {
 	additionalProperties: false;
 	properties: Record<string, unknown>;
@@ -271,6 +305,17 @@ describe("lazy MCP discovery (T6)", () => {
 		} finally {
 			await manager.disconnectAll();
 		}
+	});
+
+	it("validates guarded cache ownership after hashing and at the persistent write boundary", async () => {
+		const config = serverConfig(CACHED_SERVER, "Cached docs server");
+		const toolCache = new MCPToolCache(storage);
+		const shouldCommit = mock(() => true);
+
+		await toolCache.set(CACHED_SERVER, config, [CACHED_TOOL_DEF], shouldCommit);
+
+		expect(shouldCommit).toHaveBeenCalledTimes(2);
+		expect(await toolCache.get(CACHED_SERVER, config)).toEqual([CACHED_TOOL_DEF]);
 	});
 
 	it("resolves lazy MCP tool names against the longest configured sanitized server name", async () => {
@@ -440,7 +485,7 @@ describe("lazy MCP discovery (T6)", () => {
 		const toolLoad = Promise.withResolvers<MCPToolDefinition[]>();
 		const authStorage = await AuthStorage.create(path.join(workDir, `stored-loading-${Snowflake.next()}.db`));
 		const modelRegistry = new ModelRegistry(authStorage, path.join(workDir, "stored-loading-models.yml"));
-		let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+		let session: AgentSession | undefined;
 		try {
 			await manager.discoverDeferred();
 			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
@@ -499,7 +544,7 @@ describe("lazy MCP discovery (T6)", () => {
 		const modelRegistry = new ModelRegistry(authStorage, path.join(workDir, "serialized-refresh-models.yml"));
 		const firstRefreshStarted = Promise.withResolvers<void>();
 		const releaseFirstRefresh = Promise.withResolvers<void>();
-		let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+		let session: AgentSession | undefined;
 		let manager: MCPManager | undefined;
 		try {
 			({ session, mcpManager: manager } = await createAgentSession({
@@ -564,7 +609,7 @@ describe("lazy MCP discovery (T6)", () => {
 		const authStorage = await AuthStorage.create(path.join(workDir, `queue-recovery-${Snowflake.next()}.db`));
 		const modelRegistry = new ModelRegistry(authStorage, path.join(workDir, "queue-recovery-models.yml"));
 		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
-		let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+		let session: AgentSession | undefined;
 		let manager: MCPManager | undefined;
 		try {
 			({ session, mcpManager: manager } = await createAgentSession({
@@ -619,7 +664,7 @@ describe("lazy MCP discovery (T6)", () => {
 		const toolLoad = Promise.withResolvers<MCPToolDefinition[]>();
 		const authStorage = await AuthStorage.create(path.join(workDir, `dispose-refresh-${Snowflake.next()}.db`));
 		const modelRegistry = new ModelRegistry(authStorage, path.join(workDir, "dispose-refresh-models.yml"));
-		let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+		let session: AgentSession | undefined;
 		let refreshCompleted = false;
 		try {
 			await manager.discoverDeferred();
@@ -1168,6 +1213,557 @@ describe("lazy MCP discovery (T6)", () => {
 			expect(manager.getConnection(DEFERRED_SERVER)).toBeDefined();
 			expect(manager.isServerDeferred(CACHED_SERVER)).toBe(false);
 			expect(manager.isServerDeferred(DEFERRED_SERVER)).toBe(false);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("resolves lazy tool names by owning-server metadata and non-stealing prefix fallback", async () => {
+		// Ambiguous namespace: server `foo` (tools `bar`, `bar_baz`) and server
+		// `foo_bar` (tool `baz`) all normalize under `mcp__foo_...`. Pseudo-entries
+		// use `mcp__server__<server>`, so a bare `mcp__foo_bar` is a real
+		// `<server>_<tool>` (server `foo`, tool `bar`), NOT a name-equality match
+		// for configured server `foo_bar`.
+		fs.writeFileSync(
+			path.join(workDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					foo: serverConfig("foo", "Foo server"),
+					foo_bar: serverConfig("foo_bar", "Foo bar server"),
+				},
+			}),
+		);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		try {
+			await manager.discoverDeferred();
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+				mockConnectionFor(name, config),
+			);
+			listToolsSpy.mockResolvedValue([
+				{ name: "bar", description: "Foo bar tool", inputSchema: { type: "object", properties: {} } },
+				{ name: "bar_baz", description: "Foo bar_baz tool", inputSchema: { type: "object", properties: {} } },
+			]);
+
+			// Uncached fallback: configured `foo_bar` must NOT steal a bare
+			// `mcp__foo_bar` via name-equality; only a real `<server>_<tool>` prefix
+			// qualifies, so it resolves to server `foo` (tool `bar`).
+			expect(manager.resolveServerNameFromToolName("mcp__foo_bar")).toBe("foo");
+			// Longest configured sanitized prefix still wins where no live tool exists.
+			expect(manager.resolveServerNameFromToolName("mcp__foo_bar_baz")).toBe("foo_bar");
+
+			// Load `foo`'s live tools (`bar` → mcp__foo_bar, `bar_baz` →
+			// mcp__foo_bar_baz, both mcpServerName `foo`).
+			await manager.connectServerOnDemand("foo");
+			expect(manager.getTools().map(tool => tool.name)).toEqual(
+				expect.arrayContaining(["mcp__foo_bar", "mcp__foo_bar_baz"]),
+			);
+
+			// Exact live-metadata now wins: `mcp__foo_bar_baz` resolves to its true
+			// owner `foo`, overriding the longer prefix-colliding config `foo_bar`.
+			expect(manager.resolveServerNameFromToolName("mcp__foo_bar_baz")).toBe("foo");
+			expect(manager.resolveServerNameFromToolName("mcp__foo_bar")).toBe("foo");
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("keeps a cache-miss pseudo-entry discoverable through pending readiness and hides it once ready", async () => {
+		writeProjectMcpConfig(workDir);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		const toolLoad = Promise.withResolvers<MCPToolDefinition[]>();
+		try {
+			await manager.discoverDeferred();
+			// Cache-miss server starts discoverable.
+			expect(manager.getDeferredDiscoverableTools().map(tool => tool.name)).toContain(
+				createMCPServerToolName(DEFERRED_SERVER),
+			);
+
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+				mockConnectionFor(name, config),
+			);
+			listToolsSpy.mockImplementation(() => toolLoad.promise);
+
+			const connect = manager.connectServerOnDemand(DEFERRED_SERVER);
+			// Connection stored but listTools() still pending: the pseudo-entry must
+			// remain discoverable so a cancelled search can retry and join it.
+			await waitFor(
+				() => manager.getConnection(DEFERRED_SERVER) !== undefined,
+				"Timed out waiting for pending deferred connection",
+			);
+			expect(manager.getDeferredDiscoverableTools().map(tool => tool.name)).toContain(
+				createMCPServerToolName(DEFERRED_SERVER),
+			);
+
+			toolLoad.resolve([LIVE_TOOL_DEF]);
+			await connect;
+			// Readiness completed with tools → pseudo-entry hidden.
+			expect(manager.getDeferredDiscoverableTools().map(tool => tool.name)).not.toContain(
+				createMCPServerToolName(DEFERRED_SERVER),
+			);
+		} finally {
+			toolLoad.resolve([LIVE_TOOL_DEF]);
+			await manager.disconnectAll();
+		}
+	});
+
+	it("hides a cache-miss pseudo-entry for a ready server that exposes zero tools", async () => {
+		writeProjectMcpConfig(workDir);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		try {
+			await manager.discoverDeferred();
+			expect(manager.getDeferredDiscoverableTools().map(tool => tool.name)).toContain(
+				createMCPServerToolName(DEFERRED_SERVER),
+			);
+
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+				mockConnectionFor(name, config),
+			);
+			// A ready server that legitimately exposes no tools still completes
+			// readiness, so its pseudo-entry must be hidden, not left dangling.
+			listToolsSpy.mockResolvedValue([]);
+
+			await manager.connectServerOnDemand(DEFERRED_SERVER);
+
+			expect(manager.getConnection(DEFERRED_SERVER)).toBeDefined();
+			expect(manager.getTools().filter(tool => tool.mcpServerName === DEFERRED_SERVER)).toEqual([]);
+			expect(manager.getDeferredDiscoverableTools().map(tool => tool.name)).not.toContain(
+				createMCPServerToolName(DEFERRED_SERVER),
+			);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	for (const disconnect of ["disconnectServer", "disconnectAll"] as const) {
+		it(`does not publish pending tool readiness after ${disconnect}`, async () => {
+			writeProjectMcpConfig(workDir);
+			const manager = new MCPManager(workDir, new MCPToolCache(storage));
+			const listStarted = Promise.withResolvers<void>();
+			const toolLoad = Promise.withResolvers<MCPToolDefinition[]>();
+			const onToolsChanged = mock(() => {});
+			manager.setOnToolsChanged(onToolsChanged);
+			try {
+				await manager.discoverDeferred();
+				connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+					mockConnectionFor(name, config),
+				);
+				listToolsSpy.mockImplementation(() => {
+					listStarted.resolve();
+					return toolLoad.promise;
+				});
+
+				const readinessResult = manager.connectServerOnDemand(DEFERRED_SERVER).then(
+					() => undefined,
+					error => error,
+				);
+				await listStarted.promise;
+				expect(manager.getConnection(DEFERRED_SERVER)).toBeDefined();
+
+				if (disconnect === "disconnectServer") {
+					await manager.disconnectServer(DEFERRED_SERVER);
+				} else {
+					await manager.disconnectAll();
+				}
+				toolLoad.resolve([LIVE_TOOL_DEF]);
+
+				const readinessError = await readinessResult;
+				expect(readinessError).toBeInstanceOf(Error);
+				expect(manager.getConnection(DEFERRED_SERVER)).toBeUndefined();
+				expect(manager.getTools().filter(tool => tool.mcpServerName === DEFERRED_SERVER)).toEqual([]);
+				expect(manager.getDiscoverableServerSummaries().some(summary => summary.name === DEFERRED_SERVER)).toBe(
+					false,
+				);
+				expect(onToolsChanged).not.toHaveBeenCalled();
+			} finally {
+				toolLoad.resolve([LIVE_TOOL_DEF]);
+				await manager.disconnectAll();
+			}
+		});
+	}
+
+	it("does not let a stale on-demand readiness attempt poison a same-name replacement", async () => {
+		writeProjectMcpConfig(workDir);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		const listLoads: Array<{
+			promise: Promise<MCPToolDefinition[]>;
+			resolve: (value: MCPToolDefinition[]) => void;
+		}> = [];
+		const oldListStarted = Promise.withResolvers<void>();
+		const replacementListStarted = Promise.withResolvers<void>();
+		try {
+			await manager.discoverDeferred();
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+				mockConnectionFor(name, config),
+			);
+			listToolsSpy.mockImplementation(() => {
+				const latch = Promise.withResolvers<MCPToolDefinition[]>();
+				listLoads.push(latch);
+				if (listLoads.length === 1) oldListStarted.resolve();
+				if (listLoads.length === 2) replacementListStarted.resolve();
+				return latch.promise;
+			});
+
+			const oldReady = manager.connectServerOnDemand(DEFERRED_SERVER).then(
+				() => undefined,
+				error => error,
+			);
+			await oldListStarted.promise;
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+
+			await manager.disconnectServer(DEFERRED_SERVER);
+			await manager.discoverDeferred();
+
+			const replacementReady = manager.connectServerOnDemand(DEFERRED_SERVER);
+			await replacementListStarted.promise;
+			expect(connectSpy).toHaveBeenCalledTimes(2);
+			expect(manager.getConnection(DEFERRED_SERVER)).toBeDefined();
+			expect(manager.getServerError(DEFERRED_SERVER)).toBeUndefined();
+
+			listLoads[0]?.resolve([LIVE_TOOL_DEF]);
+			const oldOutcome = await oldReady;
+			expect(oldOutcome).toBeInstanceOf(Error);
+			expect(manager.getServerError(DEFERRED_SERVER)).toBeUndefined();
+			let thirdSettled = false;
+			const thirdReady = manager.connectServerOnDemand(DEFERRED_SERVER).finally(() => {
+				thirdSettled = true;
+			});
+			expect(connectSpy).toHaveBeenCalledTimes(2);
+
+			await Promise.resolve();
+			expect(thirdSettled).toBe(false);
+
+			listLoads[1]?.resolve([LIVE_TOOL_DEF]);
+			await Promise.all([replacementReady, thirdReady]);
+			expect(thirdSettled).toBe(true);
+
+			expect(manager.getConnection(DEFERRED_SERVER)).toBeDefined();
+			expect(manager.getTools().filter(tool => tool.mcpServerName === DEFERRED_SERVER)).toHaveLength(1);
+			expect(manager.getServerError(DEFERRED_SERVER)).toBeUndefined();
+		} finally {
+			for (const latch of listLoads) latch.resolve([LIVE_TOOL_DEF]);
+			await manager.disconnectAll();
+		}
+	});
+
+	it("does not let an obsolete connection overwrite its same-name replacement's cache after hashing", async () => {
+		const oldConfig = serverConfig(DEFERRED_SERVER, "Old deferred wiki server");
+		if (oldConfig.type !== "stdio") throw new Error("Expected stdio test config");
+		oldConfig.args = [DEFERRED_SERVER, "old"];
+		fs.writeFileSync(
+			path.join(workDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { [DEFERRED_SERVER]: oldConfig } }),
+		);
+		const toolCache = new MCPToolCache(storage);
+		const manager = new MCPManager(workDir, toolCache);
+		const oldTool: MCPToolDefinition = {
+			...LIVE_TOOL_DEF,
+			name: "old_lookup",
+			description: "Obsolete tool schema",
+		};
+		const replacementTool: MCPToolDefinition = {
+			...LIVE_TOOL_DEF,
+			name: "replacement_lookup",
+			description: "Replacement tool schema",
+		};
+		const connections: MCPServerConnection[] = [];
+		const cacheWrites: Promise<void>[] = [];
+		const originalCacheSet = toolCache.set.bind(toolCache);
+		spyOn(toolCache, "set").mockImplementation((...args) => {
+			const write = originalCacheSet(...args);
+			cacheWrites.push(write);
+			return write;
+		});
+		const setCacheSpy = spyOn(storage, "setCache");
+
+		const blockedDigest = Promise.withResolvers<ArrayBuffer>();
+		const oldDigestStarted = Promise.withResolvers<void>();
+		const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+		let blockedFirstDigest = false;
+		let releaseOldDigest = async (): Promise<void> => {};
+		spyOn(crypto.subtle, "digest").mockImplementation((algorithm, data) => {
+			if (!blockedFirstDigest) {
+				blockedFirstDigest = true;
+				let released = false;
+				releaseOldDigest = async () => {
+					if (released) return;
+					released = true;
+					blockedDigest.resolve(await originalDigest(algorithm, data));
+				};
+				oldDigestStarted.resolve();
+				return blockedDigest.promise;
+			}
+			return originalDigest(algorithm, data);
+		});
+
+		try {
+			await manager.discoverDeferred();
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) => {
+				const connection = mockConnectionFor(name, config);
+				connections.push(connection);
+				return connection;
+			});
+			listToolsSpy.mockImplementation(async connection =>
+				connection === connections[0] ? [oldTool] : [replacementTool],
+			);
+
+			const oldReady = manager.connectServerOnDemand(DEFERRED_SERVER);
+			await oldDigestStarted.promise;
+			await oldReady;
+			const oldOwnedConfig = manager.getServerConfig(DEFERRED_SERVER);
+			if (!oldOwnedConfig) throw new Error("Expected the old manager-owned config");
+			const oldOwnedConfigSnapshot = structuredClone(oldOwnedConfig);
+			const oldCacheWrite = cacheWrites[0];
+			if (!oldCacheWrite) throw new Error("Expected the old cache write to be pending");
+
+			await manager.disconnectServer(DEFERRED_SERVER);
+			const replacementConfig = serverConfig(DEFERRED_SERVER, "Replacement deferred wiki server");
+			if (replacementConfig.type !== "stdio") throw new Error("Expected stdio test config");
+			replacementConfig.args = [DEFERRED_SERVER, "replacement"];
+			fs.writeFileSync(
+				path.join(workDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { [DEFERRED_SERVER]: replacementConfig } }),
+			);
+			clearFsCache();
+			await manager.discoverDeferred();
+			await manager.connectServerOnDemand(DEFERRED_SERVER);
+			const replacementOwnedConfig = manager.getServerConfig(DEFERRED_SERVER);
+			if (!replacementOwnedConfig) throw new Error("Expected the replacement manager-owned config");
+			expect(replacementOwnedConfig).not.toEqual(oldOwnedConfigSnapshot);
+			const replacementCacheWrite = cacheWrites[1];
+			if (!replacementCacheWrite) throw new Error("Expected the replacement cache write");
+			await replacementCacheWrite;
+			expect(setCacheSpy).toHaveBeenCalledTimes(1);
+
+			await releaseOldDigest();
+			await oldCacheWrite;
+			expect(setCacheSpy).toHaveBeenCalledTimes(1);
+
+			const freshCache = new MCPToolCache(storage);
+			expect(await freshCache.get(DEFERRED_SERVER, replacementOwnedConfig)).toEqual([replacementTool]);
+			expect(await freshCache.get(DEFERRED_SERVER, oldOwnedConfigSnapshot)).toBeNull();
+		} finally {
+			await releaseOldDigest();
+			await Promise.all(cacheWrites);
+			await manager.disconnectAll();
+		}
+	});
+
+	it("search_tool_bm25 connects and activates a generic live tool matched only by server description", async () => {
+		// Cache-miss server whose only query signal is its configured description;
+		// its live tool name (`search`) does not contain the query terms.
+		fs.writeFileSync(
+			path.join(workDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					[DEFERRED_SERVER]: serverConfig(DEFERRED_SERVER, "Product documentation knowledge base"),
+				},
+			}),
+		);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		try {
+			await manager.discoverDeferred();
+			expect(connectSpy).not.toHaveBeenCalled();
+
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) => {
+				expect(name).toBe(DEFERRED_SERVER);
+				return mockConnectionFor(name, config);
+			});
+			listToolsSpy.mockResolvedValue([
+				{ name: "search", description: "Run a query", inputSchema: { type: "object", properties: {} } },
+			]);
+
+			// The pseudo-entry carries the server description in its summary so the
+			// query matches before connect.
+			const pseudo = manager.getDeferredDiscoverableTools();
+			const session = createBm25Session(manager, { discoverableTools: pseudo });
+			const tool = new SearchToolBm25Tool(session);
+
+			const result = await tool.execute("call-desc-only", { query: "documentation knowledge base", limit: 5 });
+
+			// Right server connected once, and the generic live tool ranked/activated
+			// via the preserved description signal — both sinks, not just reconnect.
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(connectSpy.mock.calls[0]?.[0]).toBe(DEFERRED_SERVER);
+			const liveToolName = `mcp__${DEFERRED_SERVER}_search`;
+			expect(result.details?.activated_tools).toContain(liveToolName);
+			expect(result.details?.tools.map(match => match.name)).toContain(liveToolName);
+			expect(session.getSelectedMCPToolNames()).toContain(liveToolName);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("search_tool_bm25 retry after abort joins pending cache-miss readiness and activates", async () => {
+		// Cache-miss server matched only by its configured description; its live
+		// tool name (`search`) does not carry the query terms.
+		fs.writeFileSync(
+			path.join(workDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					[DEFERRED_SERVER]: serverConfig(DEFERRED_SERVER, "Product documentation knowledge base"),
+				},
+			}),
+		);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		const listStarted = Promise.withResolvers<void>();
+		const toolLoad = Promise.withResolvers<MCPToolDefinition[]>();
+		const liveToolDef: MCPToolDefinition = {
+			name: "search",
+			description: "Run a query",
+			inputSchema: { type: "object", properties: {} },
+		};
+		const liveToolName = `mcp__${DEFERRED_SERVER}_search`;
+		const query = "documentation knowledge base";
+		const secondReachedManager = Promise.withResolvers<void>();
+		let onDemandCalls = 0;
+		try {
+			await manager.discoverDeferred();
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+				mockConnectionFor(name, config),
+			);
+			listToolsSpy.mockImplementation(() => {
+				listStarted.resolve();
+				return toolLoad.promise;
+			});
+
+			// Deterministic join probe: wrap the public connectServerOnDemand so we
+			// can count how many searches actually reached the manager. This
+			// distinguishes "second search joined pending readiness" from "retry has
+			// not reached the connect path yet" — microtask draining alone cannot.
+			const originalConnectServerOnDemand = manager.connectServerOnDemand.bind(manager);
+			spyOn(manager, "connectServerOnDemand").mockImplementation((name, signal) => {
+				onDemandCalls++;
+				if (onDemandCalls === 2) secondReachedManager.resolve();
+				return originalConnectServerOnDemand(name, signal);
+			});
+
+			// ONE session/tool, sourced from the cache-miss pseudo-entry.
+			const session = createBm25Session(manager, {
+				discoverableTools: manager.getDeferredDiscoverableTools(),
+			});
+			const tool = new SearchToolBm25Tool(session);
+
+			// First search: connect resolves, listTools latches, then the caller aborts.
+			const controller = new AbortController();
+			const firstSearch = tool.execute("call-abort", { query, limit: 5 }, controller.signal);
+			await listStarted.promise;
+			expect(onDemandCalls).toBe(1);
+			controller.abort(new DOMException("cancelled", "AbortError"));
+			await expect(firstSearch).rejects.toMatchObject({ name: "AbortError" });
+
+			// Readiness is still pending (listTools latched), so the manager keeps the
+			// pseudo-entry discoverable — proving the cancelled search can retry from it.
+			expect(manager.getConnection(DEFERRED_SERVER)).toBeDefined();
+			expect(manager.getDeferredDiscoverableTools().map(entry => entry.name)).toContain(
+				createMCPServerToolName(DEFERRED_SERVER),
+			);
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(listToolsSpy).toHaveBeenCalledTimes(1);
+
+			// Second search on the SAME session. Await the wrapper's 2nd invocation
+			// (a real causal signal, not a timer) to prove the retry reached the
+			// manager, then assert it joined the shared readiness: the transport
+			// connect/list stay at 1 and the search stays pending.
+			let secondSettled = false;
+			const secondSearch = tool.execute("call-retry", { query, limit: 5 }).then(result => {
+				secondSettled = true;
+				return result;
+			});
+			await secondReachedManager.promise;
+			expect(onDemandCalls).toBe(2);
+			expect(secondSettled).toBe(false);
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(listToolsSpy).toHaveBeenCalledTimes(1);
+
+			// Release the joined readiness: tools load once and the retry ranks +
+			// activates the now-live generic tool via the preserved description signal.
+			toolLoad.resolve([liveToolDef]);
+			const result = await secondSearch;
+			expect(secondSettled).toBe(true);
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			expect(listToolsSpy).toHaveBeenCalledTimes(1);
+			expect(result.details?.activated_tools).toContain(liveToolName);
+			expect(result.details?.tools.map(match => match.name)).toContain(liveToolName);
+			expect(session.getSelectedMCPToolNames()).toContain(liveToolName);
+			expect(manager.getDeferredDiscoverableTools().map(entry => entry.name)).not.toContain(
+				createMCPServerToolName(DEFERRED_SERVER),
+			);
+		} finally {
+			toolLoad.resolve([liveToolDef]);
+			await manager.disconnectAll();
+		}
+	});
+
+	it("resolves both-live normalized-name collisions to the callable registry owner", async () => {
+		// Ambiguous namespace: server `foo` tool `bar_baz` and server `foo_bar`
+		// tool `baz` both normalize to `mcp__foo_bar_baz`. AgentSession registers
+		// manager tools into a Map in array order, so the last exact entry is callable.
+		const fooConfig = serverConfig("foo", "Foo server");
+		const fooBarConfig = serverConfig("foo_bar", "Foo bar server");
+		fs.writeFileSync(
+			path.join(workDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { foo: fooConfig, foo_bar: fooBarConfig } }),
+		);
+		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		const collisionName = "mcp__foo_bar_baz";
+		try {
+			await manager.discoverDeferred();
+			// Preserve uncached fallback: the longest configured server prefix wins
+			// before any exact tool metadata exists.
+			expect(manager.resolveServerNameFromToolName("mcp__foo_bar")).toBe("foo");
+			expect(manager.resolveServerNameFromToolName(collisionName)).toBe("foo_bar");
+
+			connectSpy.mockImplementation(async (name: string, config: MCPServerConfig) =>
+				mockConnectionFor(name, config),
+			);
+			listToolsSpy.mockImplementation(async (connection: MCPServerConnection) =>
+				connection.name === "foo"
+					? [{ name: "bar_baz", description: "Foo collision", inputSchema: { type: "object", properties: {} } }]
+					: [{ name: "baz", description: "Foo bar collision", inputSchema: { type: "object", properties: {} } }],
+			);
+			await manager.discoverAndConnect();
+
+			const exactOwners = manager
+				.getTools()
+				.filter(tool => tool.name === collisionName)
+				.map(tool => tool.mcpServerName);
+			expect(exactOwners).toEqual(["foo", "foo_bar"]);
+			const callableOwner = await getCallableMCPToolOwner(workDir, manager.getTools(), collisionName);
+			expect(callableOwner).toBe("foo_bar");
+			expect(manager.resolveServerNameFromToolName(collisionName)).toBe(callableOwner);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("resolves both-cached normalized-name collisions to the callable registry owner", async () => {
+		const fooConfig = serverConfig("foo", "Foo server");
+		const fooBarConfig = serverConfig("foo_bar", "Foo bar server");
+		fs.writeFileSync(
+			path.join(workDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { foo: fooConfig, foo_bar: fooBarConfig } }),
+		);
+		const toolCache = new MCPToolCache(storage);
+		await toolCache.set("foo", fooConfig, [
+			{ name: "bar_baz", description: "Cached foo collision", inputSchema: { type: "object", properties: {} } },
+		]);
+		await toolCache.set("foo_bar", fooBarConfig, [
+			{ name: "baz", description: "Cached foo bar collision", inputSchema: { type: "object", properties: {} } },
+		]);
+		const manager = new MCPManager(workDir, toolCache);
+		const collisionName = "mcp__foo_bar_baz";
+		try {
+			await manager.discoverDeferred();
+
+			const exactOwners = manager
+				.getTools()
+				.filter(tool => tool.name === collisionName)
+				.map(tool => tool.mcpServerName);
+			expect(exactOwners).toEqual(["foo", "foo_bar"]);
+			const callableOwner = await getCallableMCPToolOwner(workDir, manager.getTools(), collisionName);
+			expect(callableOwner).toBe("foo_bar");
+			expect(manager.resolveServerNameFromToolName(collisionName)).toBe(callableOwner);
+			expect(connectSpy).not.toHaveBeenCalled();
 		} finally {
 			await manager.disconnectAll();
 		}

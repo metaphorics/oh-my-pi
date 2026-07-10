@@ -88,7 +88,12 @@ export class MCPToolCache {
 		return parsed.tools as MCPToolDefinition[];
 	}
 
-	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
+	async set(
+		serverName: string,
+		config: MCPServerConfig,
+		tools: MCPToolDefinition[],
+		shouldCommit?: () => boolean,
+	): Promise<void> {
 		let configHash: string;
 		try {
 			configHash = await hashConfig(config);
@@ -96,6 +101,7 @@ export class MCPToolCache {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return;
 		}
+		if (shouldCommit && !shouldCommit()) return;
 
 		const payload: MCPToolCachePayload = {
 			version: CACHE_VERSION,
@@ -112,6 +118,7 @@ export class MCPToolCache {
 		}
 
 		const expiresAtSec = Math.floor((Date.now() + CACHE_TTL_MS) / 1000);
+		if (shouldCommit && !shouldCommit()) return;
 		this.storage.setCache(cacheKey(serverName), serialized, expiresAtSec);
 	}
 }

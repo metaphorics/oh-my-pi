@@ -442,19 +442,26 @@ export class MCPManager {
 	}
 
 	#trackOnDemandReady(name: string, ready: Promise<unknown>): Promise<void> {
-		const attempt = ready
+		let attempt: Promise<void>;
+		attempt = ready
 			.then(
 				() => {
-					this.#serverErrors.delete(name);
+					if (this.#pendingOnDemandConnections.get(name) === attempt) {
+						this.#serverErrors.delete(name);
+					}
 				},
 				error => {
-					const message = error instanceof Error ? error.message : String(error);
-					this.#serverErrors.set(name, message);
+					if (this.#pendingOnDemandConnections.get(name) === attempt) {
+						const message = error instanceof Error ? error.message : String(error);
+						this.#serverErrors.set(name, message);
+					}
 					throw error;
 				},
 			)
 			.finally(() => {
-				this.#pendingOnDemandConnections.delete(name);
+				if (this.#pendingOnDemandConnections.get(name) === attempt) {
+					this.#pendingOnDemandConnections.delete(name);
+				}
 			});
 		this.#pendingOnDemandConnections.set(name, attempt);
 		return attempt;
@@ -495,8 +502,14 @@ export class MCPManager {
 
 	getDeferredDiscoverableTools(): DiscoverableTool[] {
 		const tools: DiscoverableTool[] = [];
-		for (const [name, cachedCount] of this.#deferredServerToolCounts) {
-			if (cachedCount !== null || this.#connections.has(name) || this.#pendingConnections.has(name)) continue;
+		for (const [name, toolCount] of this.#deferredServerToolCounts) {
+			// The sentinel tracks readiness, not connection presence: `null` marks a
+			// cache-miss server whose tools have not finished loading, so keep its
+			// pseudo-entry discoverable while the shared connect/`listTools()` is
+			// still pending (a cancelled search can retry and rejoin it). Any non-null
+			// count — cached, or loaded live including a ready zero-tool server —
+			// means readiness completed, so the entry is hidden.
+			if (toolCount !== null) continue;
 			const config = this.#serverConfigs.get(name);
 			const description = config?.description?.slice(0, 200);
 			tools.push({
@@ -788,6 +801,12 @@ export class MCPManager {
 		// Stable sort by name so reconnect order does not perturb the array.
 		// See `sortMCPToolsByName` for the cache-stability rationale.
 		sortMCPToolsByName(this.#tools);
+		// Mark a deferred server ready once its live tools land. The pseudo-entry
+		// gate in getDeferredDiscoverableTools keys off this sentinel, so recording
+		// the loaded count (including 0) hides it only after readiness completes.
+		if (this.#deferredServerToolCounts.has(name)) {
+			this.#deferredServerToolCounts.set(name, tools.length);
+		}
 	}
 
 	#triggerNotificationRefresh(serverName: string, kind: "tools" | "resources" | "prompts"): void {
@@ -891,16 +910,37 @@ export class MCPManager {
 		return this.#sources.get(name) ?? this.#connections.get(name)?._source;
 	}
 
-	/** Resolve a normalized MCP tool name to the raw configured server name. */
+	/**
+	 * Resolve a normalized MCP tool name to the raw configured server name.
+	 *
+	 * Cached/live tool metadata is authoritative. AgentSession registers tools
+	 * into its name-keyed Map in array order, so the last exact entry is callable;
+	 * resolve collisions to that same owner. The sanitized
+	 * namespace is otherwise ambiguous — a tool `bar_baz` on server `foo`
+	 * normalizes to `mcp__foo_bar_baz`, which a server literally named `foo_bar`
+	 * would appear to own by prefix.
+	 *
+	 * For uncached names (no live tool yet) fall back to the longest configured
+	 * sanitized `<server>_` prefix. A bare `rest === sanitized` is NOT a tool
+	 * match: server-level pseudo-entries use the `mcp__server__<server>` shape, so
+	 * only a real `<server>_<tool>` prefix qualifies. This keeps the existing
+	 * uncached `github` / `github-mcp` longest-match resolution intact.
+	 */
 	resolveServerNameFromToolName(toolName: string): string | undefined {
 		if (!toolName.startsWith("mcp__")) return undefined;
+		for (let index = this.#tools.length - 1; index >= 0; index--) {
+			const tool = this.#tools[index];
+			if (tool?.name !== toolName) continue;
+			const owner = tool.mcpServerName;
+			if (typeof owner === "string" && owner.length > 0) return owner;
+		}
 		const rest = toolName.slice("mcp__".length);
 		let bestName: string | undefined;
 		let bestLength = -1;
 		const candidateNames = new Set([...this.#serverConfigs.keys(), ...this.#connections.keys()]);
 		for (const name of candidateNames) {
 			const sanitized = sanitizeMCPServerName(name);
-			if (rest !== sanitized && !rest.startsWith(`${sanitized}_`)) continue;
+			if (!rest.startsWith(`${sanitized}_`)) continue;
 			if (sanitized.length <= bestLength) continue;
 			bestName = name;
 			bestLength = sanitized.length;
@@ -1193,9 +1233,9 @@ export class MCPManager {
 		connection.config = config;
 		if (source) connection._source = source;
 
-		// Bail out if the server was disconnected or the manager was reset
-		// while we were connecting (e.g. /mcp reload called disconnectAll).
-		if (!this.#serverConfigs.has(name) || this.#epoch !== reconnectEpoch) {
+		// Bail out if disconnect/reload or a same-name replacement superseded
+		// this attempt while its transport was connecting.
+		if (this.#serverConfigs.get(name) !== config || this.#epoch !== reconnectEpoch) {
 			await connection.transport.close().catch(() => {});
 			throw new Error(`Server "${name}" was disconnected during reconnection`);
 		}
@@ -1219,9 +1259,27 @@ export class MCPManager {
 		};
 		try {
 			const serverTools = await listTools(connection);
+			// listTools can outlive disconnect/reload or a same-name replacement.
+			// Publish only if this exact attempt still owns the current config and
+			// connection in the epoch it captured.
+			if (
+				this.#epoch !== reconnectEpoch ||
+				this.#serverConfigs.get(name) !== config ||
+				this.#connections.get(name) !== connection
+			) {
+				throw new Error(`Server "${name}" was disconnected during tool loading`);
+			}
 			const reconnect = () => this.reconnectServer(name);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-			void this.toolCache?.set(name, config, serverTools);
+			void this.toolCache?.set(
+				name,
+				config,
+				serverTools,
+				() =>
+					this.#epoch === reconnectEpoch &&
+					this.#serverConfigs.get(name) === config &&
+					this.#connections.get(name) === connection,
+			);
 			this.#replaceServerTools(name, customTools);
 			this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
@@ -1230,7 +1288,7 @@ export class MCPManager {
 			// Clean up the connection to avoid zombie transports
 			connection.transport.onClose = undefined;
 			await connection.transport.close().catch(() => {});
-			this.#connections.delete(name);
+			if (this.#connections.get(name) === connection) this.#connections.delete(name);
 			throw error;
 		}
 	}
