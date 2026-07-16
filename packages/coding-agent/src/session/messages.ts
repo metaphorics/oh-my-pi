@@ -5,6 +5,7 @@
  * and provides a transformer to convert them to LLM-compatible messages.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { invalidateTokenEstimate } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type BranchSummaryMessage,
 	type CompactionSummaryMessage,
@@ -457,26 +458,27 @@ function stripImagesFromArrayContent(content: (TextContent | ImageContent)[]): S
  * pure local mutation and intentionally does neither.
  */
 export function stripImagesFromMessage(message: AgentMessage): number {
+	let removed = 0;
 	switch (message.role) {
 		case "user":
 		case "developer":
 		case "custom":
 		case "hookMessage": {
 			if (typeof message.content === "string") return 0;
-			const { content, removed } = stripImagesFromArrayContent(message.content);
-			if (removed > 0) {
+			const stripped = stripImagesFromArrayContent(message.content);
+			if (stripped.removed > 0) {
 				// All four roles type `content` as `string | (TextContent | ImageContent)[]`;
 				// TypeScript can't narrow the assignment across the union, so cast once.
-				(message as { content: typeof content }).content = content;
+				(message as { content: typeof stripped.content }).content = stripped.content;
+				removed = stripped.removed;
 			}
-			return removed;
+			break;
 		}
 		case "toolResult": {
-			let removed = 0;
-			const { content, removed: contentRemoved } = stripImagesFromArrayContent(message.content);
-			if (contentRemoved > 0) {
-				message.content = content;
-				removed += contentRemoved;
+			const stripped = stripImagesFromArrayContent(message.content);
+			if (stripped.removed > 0) {
+				message.content = stripped.content;
+				removed += stripped.removed;
 			}
 			const details = message.details as { images?: unknown } | null | undefined;
 			if (details && Array.isArray(details.images)) {
@@ -495,21 +497,25 @@ export function stripImagesFromMessage(message: AgentMessage): number {
 					details.images = kept;
 				}
 			}
-			return removed;
+			break;
 		}
 		case "fileMention": {
-			let removed = 0;
 			for (const file of message.files) {
 				if (file.image) {
 					file.image = undefined;
 					removed++;
 				}
 			}
-			return removed;
+			break;
 		}
 		default:
 			return 0;
 	}
+	if (removed > 0) {
+		invalidateLlmConversion(message);
+		invalidateTokenEstimate(message);
+	}
+	return removed;
 }
 
 /**
@@ -751,127 +757,274 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
 }
 
 /**
+ * Per-message LLM conversion cache. Keyed by AgentMessage identity; assistants
+ * also store the neighbor flag used when the entry was produced so a later
+ * insertion/removal of the interrupted-thinking continuity message forces a
+ * recompute for exactly that assistant (and only that assistant).
+ *
+ * Output Message[] element identities are reused on hit — callers that need a
+ * mutable copy must clone themselves. Do not memoize the sdk.ts
+ * block-images/obfuscation wrappers; those depend on live settings.
+ *
+ * When the same AgentMessage[] reference is converted again with identical
+ * length and element identities (exact repeat), the previous outer Message[]
+ * is returned as-is. Append-only growth on that reference returns a sliced
+ * copy of the prior Message[] plus the new tail (O(N) memcpy + Δ conversion),
+ * so held prior results cannot be mutated under callers. Truncation / middle
+ * replacement rebuild fully.
+ */
+interface ConvertedLlmCacheEntry {
+	out: Message[];
+	/** Meaningful only for assistants; false for pure roles. */
+	interruptedNext: boolean;
+}
+
+const llmConversionCache = new WeakMap<AgentMessage, ConvertedLlmCacheEntry>();
+
+/** Bumped whenever an in-place rewrite invalidates any per-message entry. */
+let llmConversionEpoch = 0;
+
+/** Last full conversion over a live AgentMessage[] reference (repeat / append). */
+let lastConvertSource: AgentMessage[] | undefined;
+let lastConvertRefs: AgentMessage[] = [];
+let lastConvertCounts: number[] = [];
+let lastConvertOut: Message[] = [];
+let lastConvertEpoch = -1;
+
+/**
+ * Drop the cached LLM conversion for a message after an in-place content rewrite
+ * (image strip, prune-adjacent mutations that keep object identity). Safe no-op
+ * when the message was never converted.
+ */
+export function invalidateLlmConversion(message: AgentMessage): void {
+	if (message === null || typeof message !== "object") return;
+	llmConversionCache.delete(message);
+	llmConversionEpoch++;
+}
+
+function convertMessageCached(m: AgentMessage, interruptedNext: boolean): Message[] {
+	const cached = llmConversionCache.get(m);
+	if (cached !== undefined && cached.interruptedNext === interruptedNext) {
+		return cached.out;
+	}
+	const converted = convertOneMessageToLlm(m, interruptedNext);
+	llmConversionCache.set(m, { out: converted, interruptedNext });
+	return converted;
+}
+
+/**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
  *
- * This is used by:
- * - Agent's transormToLlm option (for prompt calls and queued messages)
- * - Compaction's generateSummary (for summarization)
- * - Custom extensions and tools
+ * Pure per-message for every role except assistant, which peeks at the next
+ * entry for the interrupted-thinking continuity marker. Repeated calls over an
+ * unchanged history reuse the same Message[] element identities — and when the
+ * input array reference is an exact repeat, the outer Message[] itself is reused.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.flatMap((m, index): Message[] => {
-		switch (m.role) {
-			case "bashExecution":
-				if (m.excludeFromContext) {
-					return [];
-				}
-				return [
-					{
-						role: "user",
-						content: [{ type: "text", text: bashExecutionToText(m) }],
-						attribution: "user",
-						timestamp: m.timestamp,
-					},
-				];
-			case "pythonExecution":
-				if (m.excludeFromContext) {
-					return [];
-				}
-				return [
-					{
-						role: "user",
-						content: [{ type: "text", text: pythonExecutionToText(m) }],
-						attribution: "user",
-						timestamp: m.timestamp,
-					},
-				];
-			case "fileMention": {
-				// One `fileMention` can mix `@notes.md` (text) and `@screenshot.png` (image)
-				// in the same turn (`generateFileMentionMessages` packs every `@…` into a
-				// single message). Splitting by image presence keeps text-only mentions on
-				// the higher-priority `developer` slot while routing image attachments
-				// through `user`, the only Responses content slot that legitimately accepts
-				// `input_image` (Codex chatgpt.com /codex/responses rejects everything else
-				// with `Invalid value: 'input_image'`, #3443).
-				const wrap = (file: FileMentionMessage["files"][number]): string => {
-					const inner = file.content ? `\n${file.content}\n` : "\n";
-					return `<file path="${file.path}">${inner}</file>`;
-				};
-				const textFiles = m.files.filter(file => !file.image);
-				const imageFiles = m.files.filter(file => file.image);
-				const out: Message[] = [];
-				if (textFiles.length > 0) {
-					out.push({
-						role: "developer",
-						content: [{ type: "text" as const, text: textFiles.map(wrap).join("\n") }],
-						attribution: "user",
-						timestamp: m.timestamp,
-					});
-				}
-				if (imageFiles.length > 0) {
-					const content: (TextContent | ImageContent)[] = [
-						{ type: "text" as const, text: imageFiles.map(wrap).join("\n") },
-					];
-					for (const file of imageFiles) {
-						if (file.image) content.push(file.image);
-					}
-					out.push({
-						role: "user",
-						content,
-						attribution: "user",
-						timestamp: m.timestamp,
-					});
-				}
-				return out;
+	const length = messages.length;
+
+	// Same array + epoch: exact repeat, or append-only growth with a fresh outer
+	// Message[] (slice) so callers holding the previous result keep a stable snapshot.
+	if (
+		messages === lastConvertSource &&
+		llmConversionEpoch === lastConvertEpoch &&
+		length >= lastConvertRefs.length
+	) {
+		const prevLen = lastConvertRefs.length;
+		let prefixMatches = true;
+		for (let i = 0; i < prevLen; i++) {
+			if (messages[i] !== lastConvertRefs[i]) {
+				prefixMatches = false;
+				break;
 			}
-			case "custom": {
-				if (!isCustomMessageContent(m.content)) return [];
-				if (isUserInvokedSkillPrompt(m)) {
-					return [
-						{
-							role: "user",
-							content: customMessageContentToLlmContent(m.content),
-							attribution: "user",
-							timestamp: m.timestamp,
-						},
-					];
-				}
-				const split = convertImageBearingCustomMessage(m);
-				if (split) return split;
-				const converted = convertMessageToLlm(m);
-				return converted ? [converted] : [];
-			}
-			case "hookMessage": {
-				if (!isCustomMessageContent(m.content)) return [];
-				const split = convertImageBearingCustomMessage(m);
-				if (split) return split;
-				const converted = convertMessageToLlm(m);
-				return converted ? [converted] : [];
-			}
-			case "assistant": {
-				// A user-interrupted turn keeps its trailing thinking run on the
-				// persisted/displayed message so reload and Ctrl+L rebuilds still
-				// show it. That run is incomplete/unsigned and gets rejected on
-				// resend, so strip it here — LLM path only — when the hidden
-				// interrupted-thinking continuity message follows.
-				const source = followedByInterruptedThinking(messages, index) ? stripDemotedThinkingForLlm(m) : m;
-				const converted = convertMessageToLlm(source);
-				return converted ? [converted] : [];
-			}
-			case "branchSummary":
-			case "compactionSummary":
-			case "user":
-			case "developer":
-			case "toolResult": {
-				// Core roles share one transformer with agent-core —
-				// duplicating them here is how snapcompact frames once
-				// silently fell off the provider request.
-				const converted = convertMessageToLlm(m);
-				return converted ? [converted] : [];
-			}
-			default:
-				m satisfies never;
-				return [];
 		}
-	});
+
+		if (prefixMatches && length === prevLen) {
+			return lastConvertOut;
+		}
+
+		if (prefixMatches && length > prevLen) {
+			const out = lastConvertOut.slice();
+			const refs = lastConvertRefs.slice();
+			const counts = lastConvertCounts.slice();
+
+			// Previous-last assistant may gain an interrupted-thinking follower.
+			if (prevLen > 0) {
+				const lastIdx = prevLen - 1;
+				const prevMsg = messages[lastIdx];
+				if (prevMsg !== undefined && prevMsg.role === "assistant") {
+					const interruptedNext = followedByInterruptedThinking(messages, lastIdx);
+					const cached = llmConversionCache.get(prevMsg);
+					if (cached === undefined || cached.interruptedNext !== interruptedNext) {
+						const converted = convertMessageCached(prevMsg, interruptedNext);
+						let offset = 0;
+						for (let i = 0; i < lastIdx; i++) offset += counts[i] ?? 0;
+						const oldCount = counts[lastIdx] ?? 0;
+						out.splice(offset, oldCount, ...converted);
+						counts[lastIdx] = converted.length;
+					}
+				}
+			}
+
+			for (let index = prevLen; index < length; index++) {
+				const m = messages[index];
+				if (m === undefined) {
+					refs.push(m as unknown as AgentMessage);
+					counts.push(0);
+					continue;
+				}
+				const interruptedNext =
+					m.role === "assistant" ? followedByInterruptedThinking(messages, index) : false;
+				const converted = convertMessageCached(m, interruptedNext);
+				for (const entry of converted) out.push(entry);
+				refs.push(m);
+				counts.push(converted.length);
+			}
+
+			lastConvertRefs = refs;
+			lastConvertCounts = counts;
+			lastConvertOut = out;
+			return out;
+		}
+	}
+
+	const out: Message[] = [];
+	const refs: AgentMessage[] = new Array(length);
+	const counts: number[] = new Array(length);
+	for (let index = 0; index < length; index++) {
+		const m = messages[index];
+		refs[index] = m as AgentMessage;
+		if (m === undefined) {
+			counts[index] = 0;
+			continue;
+		}
+		const interruptedNext =
+			m.role === "assistant" ? followedByInterruptedThinking(messages, index) : false;
+		const converted = convertMessageCached(m, interruptedNext);
+		for (const entry of converted) out.push(entry);
+		counts[index] = converted.length;
+	}
+
+	lastConvertSource = messages;
+	lastConvertRefs = refs;
+	lastConvertCounts = counts;
+	lastConvertOut = out;
+	lastConvertEpoch = llmConversionEpoch;
+	return out;
+}
+
+function convertOneMessageToLlm(m: AgentMessage, interruptedNext: boolean): Message[] {
+	switch (m.role) {
+		case "bashExecution":
+			if (m.excludeFromContext) {
+				return [];
+			}
+			return [
+				{
+					role: "user",
+					content: [{ type: "text", text: bashExecutionToText(m) }],
+					attribution: "user",
+					timestamp: m.timestamp,
+				},
+			];
+		case "pythonExecution":
+			if (m.excludeFromContext) {
+				return [];
+			}
+			return [
+				{
+					role: "user",
+					content: [{ type: "text", text: pythonExecutionToText(m) }],
+					attribution: "user",
+					timestamp: m.timestamp,
+				},
+			];
+		case "fileMention": {
+			// One `fileMention` can mix `@notes.md` (text) and `@screenshot.png` (image)
+			// in the same turn (`generateFileMentionMessages` packs every `@…` into a
+			// single message). Splitting by image presence keeps text-only mentions on
+			// the higher-priority `developer` slot while routing image attachments
+			// through `user`, the only Responses content slot that legitimately accepts
+			// `input_image` (Codex chatgpt.com /codex/responses rejects everything else
+			// with `Invalid value: 'input_image'`, #3443).
+			const wrap = (file: FileMentionMessage["files"][number]): string => {
+				const inner = file.content ? `\n${file.content}\n` : "\n";
+				return `<file path="${file.path}">${inner}</file>`;
+			};
+			const textFiles = m.files.filter(file => !file.image);
+			const imageFiles = m.files.filter(file => file.image);
+			const fileOut: Message[] = [];
+			if (textFiles.length > 0) {
+				fileOut.push({
+					role: "developer",
+					content: [{ type: "text" as const, text: textFiles.map(wrap).join("\n") }],
+					attribution: "user",
+					timestamp: m.timestamp,
+				});
+			}
+			if (imageFiles.length > 0) {
+				const content: (TextContent | ImageContent)[] = [
+					{ type: "text" as const, text: imageFiles.map(wrap).join("\n") },
+				];
+				for (const file of imageFiles) {
+					if (file.image) content.push(file.image);
+				}
+				fileOut.push({
+					role: "user",
+					content,
+					attribution: "user",
+					timestamp: m.timestamp,
+				});
+			}
+			return fileOut;
+		}
+		case "custom": {
+			if (!isCustomMessageContent(m.content)) return [];
+			if (isUserInvokedSkillPrompt(m)) {
+				return [
+					{
+						role: "user",
+						content: customMessageContentToLlmContent(m.content),
+						attribution: "user",
+						timestamp: m.timestamp,
+					},
+				];
+			}
+			const split = convertImageBearingCustomMessage(m);
+			if (split) return split;
+			const converted = convertMessageToLlm(m);
+			return converted ? [converted] : [];
+		}
+		case "hookMessage": {
+			if (!isCustomMessageContent(m.content)) return [];
+			const split = convertImageBearingCustomMessage(m);
+			if (split) return split;
+			const converted = convertMessageToLlm(m);
+			return converted ? [converted] : [];
+		}
+		case "assistant": {
+			// A user-interrupted turn keeps its trailing thinking run on the
+			// persisted/displayed message so reload and Ctrl+L rebuilds still
+			// show it. That run is incomplete/unsigned and gets rejected on
+			// resend, so strip it here — LLM path only — when the hidden
+			// interrupted-thinking continuity message follows.
+			const source = interruptedNext ? stripDemotedThinkingForLlm(m) : m;
+			const converted = convertMessageToLlm(source);
+			return converted ? [converted] : [];
+		}
+		case "branchSummary":
+		case "compactionSummary":
+		case "user":
+		case "developer":
+		case "toolResult": {
+			// Core roles share one transformer with agent-core —
+			// duplicating them here is how snapcompact frames once
+			// silently fell off the provider request.
+			const converted = convertMessageToLlm(m);
+			return converted ? [converted] : [];
+		}
+		default:
+			m satisfies never;
+			return [];
+	}
 }

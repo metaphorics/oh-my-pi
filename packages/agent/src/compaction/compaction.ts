@@ -362,8 +362,22 @@ const IMAGE_TOKEN_ESTIMATE = 1200;
  * byte size can diverge wildly from what the provider charges, so the
  * compaction floor (which only needs the reliably-countable, on-wire-compressible
  * content) excludes them to avoid false triggers on thinking-heavy turns.
+ *
+ * Memoization is identity-based and option-split across two WeakMaps
+ * (default vs `excludeEncryptedReasoning`). Non-assistant objects are
+ * identity-memoized. Assistants are identity-memoized only when provably
+ * settled (defined usage + terminal stopReason, same gate shape as
+ * {@link getAssistantUsage}). In-flight / mutable assistants are never
+ * inserted or read from the cache. Callers that rewrite settled tool
+ * results / text blocks MUST call {@link invalidateTokenEstimate}.
  */
-export function estimateTokens(message: AgentMessage, options?: { excludeEncryptedReasoning?: boolean }): number {
+export type EstimateTokensOptions = { excludeEncryptedReasoning?: boolean };
+
+/** Uncached estimator body — exported so tests can assert memo parity. */
+export function estimateTokensUncached(
+	message: AgentMessage,
+	options?: EstimateTokensOptions,
+): number {
 	const fragments: string[] = [];
 	let extra = 0;
 	if ((message as { role?: string }).role === "bashExecution") {
@@ -452,6 +466,70 @@ export function estimateTokens(message: AgentMessage, options?: { excludeEncrypt
 
 	if (fragments.length === 0) return extra;
 	return extra + countTokens(fragments);
+}
+
+/**
+ * Token estimates are option-sensitive (`excludeEncryptedReasoning` changes the
+ * count). Keep the two option poles in separate WeakMaps so a default hit never
+ * collides with a floor-estimate hit for the same object.
+ *
+ * Values are plain numbers keyed by message identity. Assistants are only
+ * inserted when settled (terminal usage + stopReason); unsettled assistants
+ * always recompute and never pollute either map.
+ */
+const tokenEstimateCacheDefault = new WeakMap<object, number>();
+const tokenEstimateCacheExcludeEncrypted = new WeakMap<object, number>();
+
+/**
+ * True when an assistant is provably settled for identity memoization.
+ *
+ * Mirrors the terminal usage/stop gate used by {@link getAssistantUsage}: a
+ * defined `usage` object plus a defined terminal `stopReason` that is not
+ * `"aborted"` / `"error"`. Streaming partials clear `stopReason` while mutating
+ * content in place under the same identity — those MUST stay uncached. Zeroed
+ * usage on finished synthetic/history turns still settles (presence of usage,
+ * not non-zero totals).
+ */
+function isSettledAssistantMessage(message: AssistantMessage): boolean {
+	const stopReason = message.stopReason;
+	return (
+		message.usage != null &&
+		stopReason != null &&
+		stopReason !== "aborted" &&
+		stopReason !== "error"
+	);
+}
+
+/**
+ * Drop cached token estimates for `message` after an in-place content rewrite
+ * (pruning, shake, image strip). Safe no-op when the message was never cached.
+ */
+export function invalidateTokenEstimate(message: AgentMessage): void {
+	if (message === null || typeof message !== "object") return;
+	tokenEstimateCacheDefault.delete(message);
+	tokenEstimateCacheExcludeEncrypted.delete(message);
+}
+
+export function estimateTokens(message: AgentMessage, options?: EstimateTokensOptions): number {
+	const excludeEncrypted = options?.excludeEncryptedReasoning === true;
+	if (message === null || typeof message !== "object") {
+		return estimateTokensUncached(message, options);
+	}
+	const cache = excludeEncrypted ? tokenEstimateCacheExcludeEncrypted : tokenEstimateCacheDefault;
+
+	if (message.role === "assistant") {
+		const assistant = message as AssistantMessage;
+		// In-flight / mutable assistants: never read or insert.
+		if (!isSettledAssistantMessage(assistant)) {
+			return estimateTokensUncached(message, options);
+		}
+	}
+
+	const cached = cache.get(message);
+	if (cached !== undefined) return cached;
+	const value = estimateTokensUncached(message, options);
+	cache.set(message, value);
+	return value;
 }
 
 function estimateEntriesTokens(entries: SessionEntry[], startIndex: number, endIndex: number): number {

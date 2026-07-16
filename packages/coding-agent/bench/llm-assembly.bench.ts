@@ -21,11 +21,13 @@ import { buildSyntheticAgentMessages } from "./fixtures/synthetic-transcript";
 const N = 5000;
 const CALLS_PER_EPISODE = 10;
 const APPEND_PER_CALL = 2;
-const WARMUP_EPISODES = 8;
-const MEASURE_EPISODES = 40;
-const SWEEPS_PER_SAMPLE = 8;
-const WARMUP_SWEEP_SAMPLES = 4;
-const MEASURE_SWEEP_SAMPLES = 24;
+/** Full successive episodes averaged into one convert sample (noise amortization). */
+const EPISODES_PER_SAMPLE = 10;
+const WARMUP_SAMPLES = 12;
+const MEASURE_SAMPLES = 40;
+const SWEEPS_PER_SAMPLE = 48;
+const WARMUP_SWEEP_SAMPLES = 12;
+const MEASURE_SWEEP_SAMPLES = 40;
 
 function median(xs: number[]): number {
 	if (xs.length === 0) return 0;
@@ -60,11 +62,28 @@ function makePadMessage(i: number): AgentMessage {
 	};
 }
 
+console.log(`llm-assembly: building N=${N} AgentMessage[] fixture…`);
+const templateMessages = buildSyntheticAgentMessages(N);
+console.log(`  fixture length=${templateMessages.length}`);
+
+/** Fresh object identities each episode (WeakMap-safe) without rebuild cost noise. */
+function freshHistoryFromTemplate(): AgentMessage[] {
+	return templateMessages.map(m => {
+		if (m && typeof m === "object") {
+			return { ...(m as object) } as AgentMessage;
+		}
+		return m;
+	});
+}
+
 /**
  * One successive episode on a growing history:
  * start from a FRESH base (new message identities each episode so post-WS-E
- * identity memo cannot poison first-call measurements), each of 10 calls runs
+ * identity memo cannot poison first-call measurements). Each of 10 calls runs
  * convertToLlm then appends 2. Returns per-call timings.
+ *
+ * Production-shaped same-array append conversion: appends happen between timed
+ * converts (not inside an exact-repeat short-circuit batch).
  */
 function runSuccessiveEpisode(freshBase: AgentMessage[]): number[] {
 	const history = freshBase.slice();
@@ -81,39 +100,60 @@ function runSuccessiveEpisode(freshBase: AgentMessage[]): number[] {
 	return times;
 }
 
-console.log(`llm-assembly: building N=${N} AgentMessage[] fixture…`);
-const templateMessages = buildSyntheticAgentMessages(N);
-console.log(`  fixture length=${templateMessages.length}`);
-
-/** Fresh object identities each episode (WeakMap-safe) without rebuild cost noise. */
-function freshHistoryFromTemplate(): AgentMessage[] {
-	return templateMessages.map(m => {
-		if (m && typeof m === "object") {
-			return { ...(m as object) } as AgentMessage;
-		}
-		return m;
-	});
+/**
+ * Average EPISODES_PER_SAMPLE full successive episodes into one sample so
+ * timer/scheduler noise drops while each episode stays production-shaped.
+ * Fresh histories are prepared outside the timed window.
+ */
+function measureConvertSample(): {
+	episodeMs: number;
+	firstMs: number;
+	steadyMs: number;
+} {
+	const bases: AgentMessage[][] = [];
+	for (let e = 0; e < EPISODES_PER_SAMPLE; e++) {
+		bases.push(freshHistoryFromTemplate());
+	}
+	let firstTotal = 0;
+	let steadyTotal = 0;
+	// One timed window over many production-shaped successive episodes; divide
+	// for per-episode cost so timer granularity does not dominate.
+	const t0 = performance.now();
+	for (const base of bases) {
+		const times = runSuccessiveEpisode(base);
+		firstTotal += times[0] ?? 0;
+		const last3 = times.slice(-3);
+		steadyTotal += last3.reduce((a, b) => a + b, 0) / Math.max(last3.length, 1);
+	}
+	const wallMs = performance.now() - t0;
+	return {
+		episodeMs: wallMs / EPISODES_PER_SAMPLE,
+		firstMs: firstTotal / EPISODES_PER_SAMPLE,
+		steadyMs: steadyTotal / EPISODES_PER_SAMPLE,
+	};
 }
 
 // ── (a) convertToLlm successive growing history ─────────────────────────────
 // Fresh AgentMessage identities per episode so WS-E memo cannot warm "first"
 // across samples. Template is cloned shallowly (new object identity, shared
 // nested content) to avoid N=5000 rebuild noise dominating stddev.
-for (let i = 0; i < WARMUP_EPISODES; i++) {
-	runSuccessiveEpisode(freshHistoryFromTemplate());
+for (let i = 0; i < WARMUP_SAMPLES; i++) {
+	Bun.gc(true);
+	void measureConvertSample();
 }
 
 const convertEpisodeSamples: number[] = [];
 const firstCallSamples: number[] = [];
 const steadyCallSamples: number[] = [];
 
-for (let i = 0; i < MEASURE_EPISODES; i++) {
-	if (i % 8 === 0) Bun.gc(true);
-	const times = runSuccessiveEpisode(freshHistoryFromTemplate());
-	convertEpisodeSamples.push(times.reduce((a, b) => a + b, 0));
-	firstCallSamples.push(times[0] ?? 0);
-	const last3 = times.slice(-3);
-	steadyCallSamples.push(last3.reduce((a, b) => a + b, 0) / Math.max(last3.length, 1));
+for (let i = 0; i < MEASURE_SAMPLES; i++) {
+	// Isolate each sample from the previous sample's heap pressure so GC
+	// does not fire mid-timing (primary convert noise source).
+	Bun.gc(true);
+	const sample = measureConvertSample();
+	convertEpisodeSamples.push(sample.episodeMs);
+	firstCallSamples.push(sample.firstMs);
+	steadyCallSamples.push(sample.steadyMs);
 }
 
 const convertMedian = median(convertEpisodeSamples);
@@ -122,7 +162,7 @@ const firstMedian = median(firstCallSamples);
 const steadyMedian = median(steadyCallSamples);
 
 console.log(
-	`  convertToLlm ${MEASURE_EPISODES} episodes × ${CALLS_PER_EPISODE} successive growing calls: ` +
+	`  convertToLlm ${MEASURE_SAMPLES} samples × ${EPISODES_PER_SAMPLE} episodes × ${CALLS_PER_EPISODE} successive growing calls: ` +
 		`median=${convertMedian.toFixed(4)}ms/episode stddev=${convertSd.toFixed(4)}ms ` +
 		`(~${(convertMedian / CALLS_PER_EPISODE).toFixed(4)}ms/call)`,
 );
@@ -153,6 +193,7 @@ function multiSweepMs(messages: AgentMessage[], sweeps: number): { ms: number; t
 // Cold first/second on FRESH identities BEFORE any multi-sweep warmup.
 // Pre-WS-E both may be similar; post-WS-E first >> second when memoized by identity.
 const coldMessages = buildSyntheticAgentMessages(N);
+Bun.gc(true);
 const firstSweepT0 = performance.now();
 const coldTotal = sweepTokens(coldMessages);
 const firstSweep = performance.now() - firstSweepT0;
@@ -173,6 +214,7 @@ for (let i = 0; i < WARMUP_SWEEP_SAMPLES; i++) multiSweepMs(warmMessages, SWEEPS
 const sweepSamples: number[] = [];
 let lastTotal = 0;
 for (let i = 0; i < MEASURE_SWEEP_SAMPLES; i++) {
+	Bun.gc(true);
 	const r = multiSweepMs(warmMessages, SWEEPS_PER_SAMPLE);
 	sweepSamples.push(r.ms);
 	lastTotal = r.total;

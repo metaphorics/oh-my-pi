@@ -1,13 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { estimateTokens, estimateTokensUncached } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
 	type CustomMessage,
 	convertToLlm,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	invalidateLlmConversion,
 	replaceLlmImagesWithText,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
+	stripImagesFromMessage,
 } from "./messages";
 
 function customMessage(customType: string, attribution: "agent" | "user"): CustomMessage<SkillPromptDetails> {
@@ -123,6 +126,131 @@ describe("convertToLlm", () => {
 			"thinking",
 		]);
 	});
+
+	it("reuses identical Message element identity across unchanged convertToLlm calls", () => {
+		const messages: AgentMessage[] = [
+			{ role: "user", content: [{ type: "text", text: "hello" }], attribution: "user", timestamp: 1 },
+			abortedAssistant([
+				{ type: "text", text: "partial answer" },
+				{ type: "thinking", thinking: "interrupted reasoning" },
+			]),
+			{
+				role: "toolResult",
+				toolCallId: "c1",
+				toolName: "bash",
+				content: [{ type: "text", text: "tool body" }],
+				isError: false,
+				timestamp: 3,
+			},
+		];
+		const first = convertToLlm(messages);
+		const second = convertToLlm(messages);
+		expect(first.length).toBeGreaterThan(0);
+		expect(second.length).toBe(first.length);
+		for (let i = 0; i < first.length; i++) {
+			expect(second[i]).toBe(first[i]);
+		}
+	});
+
+	it("recomputes only the interrupted assistant when the continuity follower is inserted or removed", () => {
+		const assistant = abortedAssistant([
+			{ type: "text", text: "partial answer" },
+			{ type: "thinking", thinking: "interrupted reasoning" },
+		]);
+		const user: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "hello" }],
+			attribution: "user",
+			timestamp: 0,
+		};
+		const withoutFollower: AgentMessage[] = [user, assistant];
+		const first = convertToLlm(withoutFollower);
+		const firstAssistant = first.find(entry => entry.role === "assistant");
+		expect(firstAssistant).toBeDefined();
+		expect(
+			Array.isArray(firstAssistant?.content) && firstAssistant.content.map(block => block.type),
+		).toEqual(["text", "thinking"]);
+
+		const withFollower: AgentMessage[] = [user, assistant, interruptedThinkingContinuity()];
+		const second = convertToLlm(withFollower);
+		const secondAssistant = second.find(entry => entry.role === "assistant");
+		expect(secondAssistant).toBeDefined();
+		expect(secondAssistant).not.toBe(firstAssistant);
+		expect(Array.isArray(secondAssistant?.content) && secondAssistant.content.map(block => block.type)).toEqual([
+			"text",
+		]);
+		// Unrelated user conversion stays identity-stable across the neighbor flip.
+		expect(second.find(entry => entry.role === "user")).toBe(first.find(entry => entry.role === "user"));
+
+		const third = convertToLlm(withoutFollower);
+		const thirdAssistant = third.find(entry => entry.role === "assistant");
+		expect(thirdAssistant).not.toBe(secondAssistant);
+		expect(
+			Array.isArray(thirdAssistant?.content) && thirdAssistant.content.map(block => block.type),
+		).toEqual(["text", "thinking"]);
+	});
+
+	it("invalidates conversion cache when stripImagesFromMessage rewrites content in place", () => {
+		const message: AgentMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: "look" },
+				{ type: "image", data: "aaaa", mimeType: "image/png" },
+			],
+			attribution: "user",
+			timestamp: 1,
+		};
+		const first = convertToLlm([message]);
+		expect(first[0]).toBeDefined();
+		expect(stripImagesFromMessage(message)).toBe(1);
+		const second = convertToLlm([message]);
+		expect(second[0]).not.toBe(first[0]);
+		expect(Array.isArray(second[0]?.content) && second[0].content.map(b => b.type)).toEqual(["text"]);
+	});
+
+	it("invalidates token estimates when stripImagesFromMessage rewrites content in place", () => {
+		const message: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "c1",
+			toolName: "bash",
+			content: [
+				{ type: "text", text: "generated" },
+				{ type: "image", data: "aaaa", mimeType: "image/png" },
+				{ type: "image", data: "bbbb", mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: 1,
+		};
+		const before = estimateTokens(message);
+		expect(before).toBe(estimateTokens(message)); // warm identity cache
+		expect(stripImagesFromMessage(message)).toBe(2);
+		const after = estimateTokens(message);
+		expect(after).toBeLessThan(before);
+		expect(after).toBe(estimateTokensUncached(message));
+	});
+
+	it("invalidates conversion cache for an explicit invalidateLlmConversion call", () => {
+		const message: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "c1",
+			toolName: "bash",
+			content: [{ type: "text", text: "full tool body" }],
+			isError: false,
+			timestamp: 1,
+		};
+		const first = convertToLlm([message]);
+		message.content = [{ type: "text", text: "[Old tool result content cleared]" }];
+		invalidateLlmConversion(message);
+		const second = convertToLlm([message]);
+		expect(second[0]).not.toBe(first[0]);
+		expect(
+			Array.isArray(second[0]?.content) &&
+				second[0].content[0] &&
+				second[0].content[0].type === "text" &&
+				second[0].content[0].text,
+		).toBe("[Old tool result content cleared]");
+	});
+
 });
 
 describe("replaceLlmImagesWithText", () => {

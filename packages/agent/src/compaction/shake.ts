@@ -13,7 +13,7 @@
 import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { countTokens } from "../tokenizer";
 import type { AgentMessage } from "../types";
-import { estimateTokens } from "./compaction";
+import { estimateTokens, invalidateTokenEstimate } from "./compaction";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "./entries";
 import {
 	collectToolCallsById,
@@ -406,12 +406,18 @@ export function applyShakeRegion(region: ShakeRegion, replacement: string): void
 		const message = region.entry.message as ToolResultMessage;
 		message.content = [{ type: "text", text: replacement }];
 		message.prunedAt = Date.now();
+		invalidateTokenEstimate(message as AgentMessage);
 		return;
 	}
 	const slot = getBlockTextSlot(region.entry, region.blockIndex);
 	if (!slot) return;
 	const text = slot.read();
 	slot.write(text.slice(0, region.start) + replacement + text.slice(region.end));
+	// Block rewrites mutate user/assistant/developer content in place on the
+	// same message identity — drop any prior token estimate for that object.
+	if (region.entry.type === "message") {
+		invalidateTokenEstimate(region.entry.message as AgentMessage);
+	}
 }
 
 /**

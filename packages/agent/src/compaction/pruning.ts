@@ -4,7 +4,7 @@
 
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { AgentMessage, AgentToolCall } from "../types";
-import { estimateTokens } from "./compaction";
+import { estimateTokens, invalidateTokenEstimate } from "./compaction";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 import {
 	collectToolCallsById,
@@ -295,6 +295,7 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 	for (const candidate of toPrune) {
 		candidate.message.content = [{ type: "text", text: candidate.notice }];
 		candidate.message.prunedAt = prunedAt;
+		invalidateTokenEstimate(candidate.message as AgentMessage);
 		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
 	}
 	return { prunedCount: toPrune.length, tokensSaved };
@@ -398,6 +399,7 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 				: createPrunedNotice(candidate.tokens);
 		message.content = [{ type: "text", text: notice }];
 		message.prunedAt = prunedAt;
+		invalidateTokenEstimate(message as AgentMessage);
 		prunedCount++;
 	}
 
