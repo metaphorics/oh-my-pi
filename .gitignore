@@ -75,5 +75,5 @@ python/robomp/web/verify-out/
 /verify-out/
 python/robomp/.env
 
-# Local, machine-specific boot perf baseline (see packages/coding-agent/scripts/bench-guard.ts)
-packages/coding-agent/bench/boot-baseline.json
+# Local, machine-specific perf baselines (see packages/coding-agent/scripts/bench-guard.ts)
+packages/coding-agent/bench/*-baseline.json
