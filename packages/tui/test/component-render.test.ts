@@ -2,12 +2,15 @@ import { describe, expect, it } from "bun:test";
 import {
 	type Component,
 	Container,
+	Editor,
+	type Focusable,
 	type NativeScrollbackCommittedRows,
 	type NativeScrollbackLiveRegion,
 	type NativeScrollbackReplay,
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "./render-stress-scheduler";
+import { defaultEditorTheme } from "./test-themes";
 import { VirtualTerminal } from "./virtual-terminal";
 
 // Behavioral tests for TUI.requestComponentRender: a component whose own
@@ -338,6 +341,123 @@ describe("TUI.requestComponentRender", () => {
 		}
 	});
 });
+
+describe("TUI keystroke-scoped render", () => {
+	it("does not re-render a quiet sibling transcript while typing in the focused editor", async () => {
+		const term = new VirtualTerminal(40, 8, 1_000);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new CountingLines(["msg-0", "msg-1", "msg-2"]);
+		const editor = new Editor(defaultEditorTheme);
+		tui.addChild(transcript);
+		tui.addChild(editor);
+		tui.setFocus(editor);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			const transcriptRenders = transcript.renders;
+
+			term.sendInput("x");
+			await scheduler.drain(term);
+
+			expect(editor.getText()).toBe("x");
+			expect(transcript.renders).toBe(transcriptRenders);
+			expect(visible(term).some(row => row.includes("msg-0"))).toBe(true);
+			expect(visible(term).some(row => row.includes("x"))).toBe(true);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("keeps a correct viewport when a keystroke grows the editor by one wrapped row", async () => {
+		const term = new VirtualTerminal(40, 8, 1_000);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new CountingLines(["msg-0", "msg-1"]);
+		const editor = new Editor(defaultEditorTheme);
+		// 34 chars fills the first content row at width 40; the next char wraps.
+		editor.setText("x".repeat(34));
+		tui.addChild(transcript);
+		tui.addChild(editor);
+		tui.setFocus(editor);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			// Software cursor glyph is theme.symbols.inputCursor ("|"); assert the
+			// full viewport including transcript, border, and wrap seam.
+			expect(visible(term)).toEqual([
+				"msg-0",
+				"msg-1",
+				"+--------------------------------------+",
+				"+- xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|-+",
+			]);
+			const transcriptRenders = transcript.renders;
+
+			term.sendInput("y");
+			await scheduler.drain(term);
+
+			expect(editor.getText()).toBe(`${"x".repeat(34)}y`);
+			expect(transcript.renders).toBe(transcriptRenders);
+			expect(visible(term)).toEqual([
+				"msg-0",
+				"msg-1",
+				"+--------------------------------------+",
+				"|  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  |",
+				"+- y|                                 -+",
+			]);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+
+	it("falls back to a full compose when handleInput moves focus", async () => {
+		const term = new VirtualTerminal(40, 8, 1_000);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new CountingLines(["msg-0"]);
+		const nextFocus = new CountingLines(["selector"]);
+		const focusMover: Component & Focusable = {
+			focused: false,
+			invalidate() {},
+			render() {
+				return this.focused ? ["editor-focused"] : ["editor-idle"];
+			},
+			handleInput() {
+				// Focus moves during input (submit opens a selector). The new
+				// surface is not in #componentRenderTargets, so the frame must
+				// compose fully and paint both the old and new roots.
+				tui.setFocus(nextFocus);
+			},
+		};
+
+		tui.addChild(transcript);
+		tui.addChild(focusMover);
+		tui.addChild(nextFocus);
+		tui.setFocus(focusMover);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			expect(visible(term)).toEqual(["msg-0", "editor-focused", "selector"]);
+			const transcriptRenders = transcript.renders;
+
+			term.sendInput("x");
+			await scheduler.drain(term);
+
+			expect(transcript.renders).toBeGreaterThan(transcriptRenders);
+			expect(visible(term)).toEqual(["msg-0", "editor-idle", "selector"]);
+			expect(tui.getFocused()).toBe(nextFocus);
+		} finally {
+			tui.stop();
+			await term.flush();
+		}
+	});
+});
+
 
 describe("TUI.requestDirectWrite", () => {
 	it("directly rewrites a visible unchanged-size root segment without a full render", async () => {
