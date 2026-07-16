@@ -53,6 +53,15 @@ class StreamingBlock implements Component {
 	}
 }
 
+class FinalizationProbeBlock extends StreamingBlock {
+	throwOnRead = false;
+
+	override isTranscriptBlockFinalized(): boolean {
+		if (this.throwOnRead) throw new Error("compacted-prefix query scanned the retained suffix");
+		return super.isTranscriptBlockFinalized();
+	}
+}
+
 // A still-live block that can declare a byte-stable rendered prefix. The
 // transcript container may commit only those declared rows before finalization.
 class DeclaredSettledStreamingBlock extends StreamingBlock {
@@ -99,9 +108,11 @@ class VersionedFinalizedBlock implements Component {
 	renderCount = 0;
 	#lines: string[];
 	#version = 0;
+	#sealed: boolean;
 
-	constructor(lines: string[]) {
+	constructor(lines: string[], sealed = false) {
 		this.#lines = lines;
+		this.#sealed = sealed;
 	}
 
 	mutate(lines: string[]): void {
@@ -111,6 +122,14 @@ class VersionedFinalizedBlock implements Component {
 
 	isTranscriptBlockFinalized(): boolean {
 		return true;
+	}
+
+	sealTranscriptBlock(): void {
+		this.#sealed = true;
+	}
+
+	isTranscriptBlockSealed(): boolean {
+		return this.#sealed;
 	}
 
 	getTranscriptBlockVersion(): number {
@@ -368,6 +387,60 @@ describe("TranscriptContainer", () => {
 		expect(history.renderCount).toBe(2);
 	});
 
+	it("suppresses first-time compaction inside a destructive replay transaction", () => {
+		const container = new TranscriptContainer();
+		const history = new CountingFinalizedBlock(["committed-history"]);
+		const tail = new CountingFinalizedBlock(["retained-tail"]);
+		container.addChild(history);
+		container.addChild(tail);
+
+		expect(container.render(40)).toEqual(["committed-history", "", "retained-tail"]);
+		// Post-emit publication: the rows entered native scrollback, but no
+		// render has compacted them out of the local frame yet.
+		container.setNativeScrollbackCommittedRows(2);
+
+		// A destructive replay (resize / clear-scrollback) arrives before the
+		// next ordinary render. The ED3 erase removes the committed rows from
+		// native scrollback, so the replay frame must carry complete history —
+		// a first-time compaction inside this transaction would lose the rows.
+		container.prepareNativeScrollbackReplay();
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["committed-history", "", "retained-tail"]);
+
+		// The post-emit publication releases the latch; ordinary compaction
+		// resumes on the next render.
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["retained-tail"]);
+	});
+
+	it("keeps suppressing compaction when a deferred replay frame recomposes before emitting", () => {
+		const container = new TranscriptContainer();
+		const history = new CountingFinalizedBlock(["committed-history"]);
+		const tail = new CountingFinalizedBlock(["retained-tail"]);
+		container.addChild(history);
+		container.addChild(tail);
+
+		expect(container.render(40)).toEqual(["committed-history", "", "retained-tail"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["retained-tail"]);
+
+		// The replay frame is composed but abandoned before emitting (Ghostty
+		// initial-image deferral); the TUI re-prepares and recomposes next frame.
+		container.prepareNativeScrollbackReplay();
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["committed-history", "", "retained-tail"]);
+		container.prepareNativeScrollbackReplay();
+		container.setNativeScrollbackCommittedRows(2);
+		// Still the complete frame: suppression survives until the post-emit
+		// publication, not just one render call.
+		expect(container.render(40)).toEqual(["committed-history", "", "retained-tail"]);
+
+		// Emit happened; the post-emit publication releases the latch and
+		// ordinary compaction resumes.
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["retained-tail"]);
+	});
+
 	it("does not re-render finalized rows already committed to native scrollback", () => {
 		const container = new TranscriptContainer();
 		const committed = new CountingFinalizedBlock(["committed"]);
@@ -388,6 +461,46 @@ describe("TranscriptContainer", () => {
 		expect(container.render(40)).toEqual(["committed", "", "tail"]);
 		expect(committed.renderCount).toBe(2);
 	});
+
+	it("compacts a sealed finalized versioned block", () => {
+		const container = new TranscriptContainer();
+		const history = new VersionedFinalizedBlock(["sealed-history"], true);
+		container.addChild(history);
+		container.addChild(new CountingFinalizedBlock(["tail"]));
+
+		expect(container.render(40)).toEqual(["sealed-history", "", "tail"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["tail"]);
+		expect(history.renderCount).toBe(1);
+		expect(container.isBlockUncommitted(history)).toBe(false);
+	});
+
+	it("keeps an unsealed finalized versioned block in the local frame", () => {
+		const container = new TranscriptContainer();
+		const history = new VersionedFinalizedBlock(["unsealed-history"]);
+		container.addChild(history);
+		container.addChild(new CountingFinalizedBlock(["tail"]));
+
+		expect(container.render(40)).toEqual(["unsealed-history", "", "tail"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["unsealed-history", "", "tail"]);
+	});
+
+	it("re-renders a sealed block whose version changes before compaction", () => {
+		const container = new TranscriptContainer();
+		const block = new VersionedFinalizedBlock(["original"], true);
+		container.addChild(block);
+		container.addChild(new CountingFinalizedBlock(["tail"]));
+
+		expect(container.render(40)).toEqual(["original", "", "tail"]);
+		container.setNativeScrollbackCommittedRows(2);
+		block.mutate(["updated-before-compaction"]);
+		expect(container.render(40)).toEqual(["updated-before-compaction", "", "tail"]);
+		expect(block.renderCount).toBe(2);
+		expect(container.render(40)).toEqual(["tail"]);
+		expect(block.renderCount).toBe(2);
+	});
+
 	it("re-renders a committed finalized block when its version changes", () => {
 		const container = new TranscriptContainer();
 		const block = new VersionedFinalizedBlock(["original"]);
@@ -410,6 +523,7 @@ describe("TranscriptContainer", () => {
 		expect(container.render(40)).toEqual(["original", "Error: boom"]);
 		expect(block.renderCount).toBe(2);
 	});
+
 	it("renders once after a block finalizes with rows already inside committed scrollback", () => {
 		const container = new TranscriptContainer();
 		const block = new StreamingBlock(["streaming"]);
@@ -436,7 +550,8 @@ describe("TranscriptContainer", () => {
 		expect(container.render(40)).toEqual(["streaming", "done", "", "tail"]);
 		expect(block.renderCount).toBe(rendersAfterTransition);
 	});
-	it("reports a new assistant block version after post-finalize error unpinning", () => {
+
+	it("keeps post-seal error restoration visible before compaction", () => {
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "hello" }],
@@ -446,13 +561,81 @@ describe("TranscriptContainer", () => {
 		} as AssistantMessage;
 		const component = new AssistantMessageComponent(message);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		expect(component.isTranscriptBlockSealed()).toBe(false);
 
 		component.setErrorPinned(true);
-		const pinnedVersion = component.getTranscriptBlockVersion();
-		// The restore path at the next turn's agent_start must be observable by
-		// the transcript container's committed-scrollback bypass.
+		component.sealTranscriptBlock();
+		expect(component.isTranscriptBlockSealed()).toBe(true);
+		expect(stripVTControlCharacters(component.render(120).join("\n"))).not.toContain("Error: boom");
+
+		const sealedVersion = component.getTranscriptBlockVersion();
 		component.setErrorPinned(false);
-		expect(component.getTranscriptBlockVersion()).toBeGreaterThan(pinnedVersion);
+		expect(component.getTranscriptBlockVersion()).toBeGreaterThan(sealedVersion);
+		expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("Error: boom");
+	});
+	it("reports virtualized rows via take semantics", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new VersionedFinalizedBlock(["history"], true));
+		container.addChild(new CountingFinalizedBlock(["tail"]));
+
+		expect(container.render(40)).toEqual(["history", "", "tail"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["tail"]);
+		expect(container.takeNativeScrollbackVirtualizedRows()).toBe(2);
+		expect(container.takeNativeScrollbackVirtualizedRows()).toBe(0);
+	});
+
+	it("take accumulates across renders and resets on replay and clear", () => {
+		const accumulating = new TranscriptContainer();
+		accumulating.addChild(new CountingFinalizedBlock(["first"]));
+		accumulating.addChild(new CountingFinalizedBlock(["second"]));
+		accumulating.addChild(new CountingFinalizedBlock(["tail"]));
+
+		expect(accumulating.render(40)).toEqual(["first", "", "second", "", "tail"]);
+		accumulating.setNativeScrollbackCommittedRows(2);
+		expect(accumulating.render(40)).toEqual(["second", "", "tail"]);
+		accumulating.setNativeScrollbackCommittedRows(2);
+		expect(accumulating.render(40)).toEqual(["tail"]);
+		expect(accumulating.takeNativeScrollbackVirtualizedRows()).toBe(4);
+
+		const replayed = new TranscriptContainer();
+		const replayedHistory = new CountingFinalizedBlock(["history"]);
+		replayed.addChild(replayedHistory);
+		replayed.addChild(new CountingFinalizedBlock(["tail"]));
+		expect(replayed.render(40)).toEqual(["history", "", "tail"]);
+		replayed.setNativeScrollbackCommittedRows(2);
+		// The drop includes the retained block's committed leading separator.
+		expect(replayed.render(40)).toEqual(["tail"]);
+		replayed.removeChild(replayedHistory);
+		replayed.prepareNativeScrollbackReplay();
+		expect(replayed.takeNativeScrollbackVirtualizedRows()).toBe(0);
+
+		const cleared = new TranscriptContainer();
+		cleared.addChild(new CountingFinalizedBlock(["history"]));
+		cleared.addChild(new CountingFinalizedBlock(["tail"]));
+		expect(cleared.render(40)).toEqual(["history", "", "tail"]);
+		cleared.setNativeScrollbackCommittedRows(2);
+		expect(cleared.render(40)).toEqual(["tail"]);
+		cleared.clear();
+		expect(cleared.takeNativeScrollbackVirtualizedRows()).toBe(0);
+	});
+
+	it("removeChild below the compaction boundary keeps boundary alignment", () => {
+		const container = new TranscriptContainer();
+		const first = new CountingFinalizedBlock(["first"]);
+		const survivor = new CountingFinalizedBlock(["survivor"]);
+		container.addChild(first);
+		container.addChild(survivor);
+		container.addChild(new CountingFinalizedBlock(["tail"]));
+
+		expect(container.render(40)).toEqual(["first", "", "survivor", "", "tail"]);
+		container.setNativeScrollbackCommittedRows(4);
+		expect(container.render(40)).toEqual(["tail"]);
+		expect(container.isBlockUncommitted(survivor)).toBe(false);
+
+		container.removeChild(first);
+		expect(container.render(40)).toEqual(["tail"]);
+		expect(container.isBlockUncommitted(survivor)).toBe(false);
 	});
 });
 
@@ -645,10 +828,49 @@ describe("TranscriptContainer isBlockInLiveRegion", () => {
 		expect(container.isBlockInLiveRegion(tail)).toBe(true);
 	});
 
+	it("returns false for a compacted block without scanning the retained suffix", () => {
+		const container = new TranscriptContainer();
+		const history = new VersionedFinalizedBlock(["history"], true);
+		const tail = new FinalizationProbeBlock(["tail"], true);
+		container.addChild(history);
+		container.addChild(tail);
+
+		expect(container.render(40)).toEqual(["history", "", "tail"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["tail"]);
+
+		tail.throwOnRead = true;
+		expect(container.isBlockInLiveRegion(history)).toBe(false);
+	});
+
 	it("returns false for a component that is not a child", () => {
 		const container = new TranscriptContainer();
 		container.addChild(new StreamingBlock(["a"], true));
 		expect(container.isBlockInLiveRegion(new StreamingBlock(["x"], false))).toBe(false);
+	});
+
+	it("reindexes children after removal and clear", () => {
+		const container = new TranscriptContainer();
+		const live = new StreamingBlock(["live"]);
+		const target = new StreamingBlock(["target"], true);
+		const tail = new StreamingBlock(["tail"], true);
+		container.addChild(live);
+		container.addChild(target);
+		container.addChild(tail);
+		expect(container.render(40)).toEqual(["live", "", "target", "", "tail"]);
+
+		expect(container.isBlockInLiveRegion(target)).toBe(true);
+		container.removeChild(live);
+		expect(container.isBlockInLiveRegion(target)).toBe(false);
+		const fresh = new TranscriptContainer();
+		fresh.addChild(new StreamingBlock(["target"], true));
+		fresh.addChild(new StreamingBlock(["tail"], true));
+		expect(container.render(40)).toEqual(fresh.render(40));
+
+		container.clear();
+		container.addChild(target);
+		expect(container.isBlockInLiveRegion(target)).toBe(true);
+		expect(container.isBlockInLiveRegion(tail)).toBe(false);
 	});
 });
 

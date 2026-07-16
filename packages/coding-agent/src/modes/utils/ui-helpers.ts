@@ -352,6 +352,11 @@ export class UiHelpers {
 		};
 		const messages = sessionContext.messages;
 		const count = messages.length;
+		let assistantAwaitingSeal: AssistantMessageComponent | undefined;
+		const noteHistoricalAssistant = (component: AssistantMessageComponent) => {
+			assistantAwaitingSeal?.sealTranscriptBlock();
+			assistantAwaitingSeal = component;
+		};
 		for (let i = 0; i < count; i++) {
 			const message = messages[i]!;
 			if (message.role !== "toolResult") flushPendingUsage();
@@ -362,6 +367,7 @@ export class UiHelpers {
 				const lastChild = this.ctx.chatContainer.children[this.ctx.chatContainer.children.length - 1];
 				const assistantComponent = lastChild instanceof AssistantMessageComponent ? lastChild : undefined;
 				if (assistantComponent) {
+					noteHistoricalAssistant(assistantComponent);
 					const usage = message.usage;
 					const explained = sessionContext.cacheMissExplainedAt?.[i] ?? false;
 					if (this.ctx.settings.get("display.cacheMissMarker") && !explained) {
@@ -387,6 +393,7 @@ export class UiHelpers {
 				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
 					if (!segment || !assistantHasVisibleContent(segment)) return;
 					const component = createAssistantMessageComponent(this.ctx, segment);
+					noteHistoricalAssistant(component);
 					this.ctx.chatContainer.addChild(component);
 				};
 
@@ -602,6 +609,7 @@ export class UiHelpers {
 		} else {
 			resolveTodoSnapshot();
 		}
+		this.ctx.eventController?.inheritAssistantAwaitingSeal?.(assistantAwaitingSeal);
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed
 		// during the replay — with `keepDanglingToolCalls` these are exactly the

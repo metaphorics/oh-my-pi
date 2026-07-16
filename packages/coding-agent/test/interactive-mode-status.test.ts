@@ -1,6 +1,9 @@
 import { beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -25,6 +28,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		pendingTools: new Map(),
+		eventController: { inheritAssistantAwaitingSeal: vi.fn(), resetTranscriptAnchors: vi.fn() },
 		ui: { requestRender: vi.fn() },
 		present: (content: Component | readonly Component[]) => {
 			const items = Array.isArray(content) ? content : [content];
@@ -149,5 +153,50 @@ describe("InteractiveMode.showStatus", () => {
 		// handler owns this lifecycle and uses it to guard against clearing the
 		// user's in-progress editor draft during an optimistic send (#783).
 		expect(ctx.optimisticUserMessageSignature).toBe("hello\u00001");
+	});
+
+	test("seals historical assistant predecessors but leaves the final assistant unsealed", () => {
+		const { ctx, helpers } = createInitialRenderHarness();
+		const assistant = (text: string): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+
+		helpers.renderSessionContext({ messages: [assistant("first"), assistant("final")] } as SessionContext);
+		const assistants = ctx.chatContainer.children.filter(
+			(child): child is AssistantMessageComponent => child instanceof AssistantMessageComponent,
+		);
+
+		expect(assistants).toHaveLength(2);
+		expect(assistants[0]!.isTranscriptBlockSealed()).toBe(true);
+		expect(assistants[1]!.isTranscriptBlockSealed()).toBe(false);
+		expect(ctx.eventController?.inheritAssistantAwaitingSeal).toHaveBeenCalledWith(assistants[1]);
+	});
+
+	test("resetTranscript clears event-controller anchors before disposing chat components", () => {
+		const { ctx } = createInitialRenderHarness();
+		const order: string[] = [];
+		const resetTranscriptAnchors = vi.fn(() => order.push("anchors"));
+		if (!ctx.eventController) throw new Error("event controller fixture missing");
+		ctx.eventController.resetTranscriptAnchors = resetTranscriptAnchors;
+		ctx.chatContainer.dispose = vi.fn(() => order.push("dispose"));
+		ctx.chatContainer.clear = vi.fn(() => order.push("clear"));
+
+		InteractiveMode.prototype.resetTranscript.call(ctx as InteractiveMode);
+		expect(resetTranscriptAnchors).toHaveBeenCalledTimes(1);
+		expect(order).toEqual(["anchors", "dispose", "clear"]);
 	});
 });

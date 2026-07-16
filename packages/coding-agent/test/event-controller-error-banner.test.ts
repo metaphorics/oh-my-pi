@@ -14,9 +14,12 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ErrorBannerComponent } from "@oh-my-pi/pi-coding-agent/modes/components/error-banner";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 	return {
@@ -58,7 +61,8 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		updateContent: vi.fn(() => componentCalls.push("update")),
 		setComplete: vi.fn(),
 		markTranscriptBlockFinalized: vi.fn(),
-		setErrorPinned: vi.fn(),
+		sealTranscriptBlock: vi.fn(() => componentCalls.push("seal")),
+		setErrorPinned: vi.fn((pinned: boolean) => componentCalls.push(pinned ? "pin" : "unpin")),
 		setHideThinkingBlock: vi.fn((hide: boolean) => componentCalls.push(`hide:${hide}`)),
 		messagePersistenceKey: vi.fn(() => "test-persistence-key"),
 		applyRetryRecovery: vi.fn(),
@@ -132,7 +136,25 @@ function createFixture(streamingMessage?: AssistantMessage) {
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);
-	return { controller, ctx, showPinnedError, clearPinnedError, streamingComponent, componentCalls };
+	return { controller, ctx, showPinnedError, clearPinnedError, streamingComponent, componentCalls, chatChildren };
+}
+
+function makeAttachSessionStub(isStreaming = false) {
+	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
+	const session = {
+		isStreaming,
+		subscribe(fn: (event: AgentSessionEvent) => Promise<void> | void) {
+			listener = fn;
+			return () => {};
+		},
+	} as AgentSession;
+	return {
+		session,
+		emit: async (event: AgentSessionEvent) => {
+			if (!listener) throw new Error("session was not attached");
+			await listener(event);
+		},
+	};
 }
 
 describe("EventController error banner", () => {
@@ -168,6 +190,141 @@ describe("EventController error banner", () => {
 
 		expect(clearPinnedError).toHaveBeenCalledTimes(1);
 		expect(streamingComponent.setErrorPinned).toHaveBeenCalledWith(false);
+	});
+
+	it("restores the inline error before sealing at the next assistant message", async () => {
+		const message = makeAssistantMessage({ stopReason: "error", errorMessage: "blocked" });
+		const nextMessage = makeAssistantMessage({ content: [] });
+		const { controller, streamingComponent, componentCalls } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		componentCalls.length = 0;
+
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		expect(streamingComponent.sealTranscriptBlock).not.toHaveBeenCalled();
+		await controller.handleEvent({ type: "message_start", message: nextMessage } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+
+		expect(componentCalls).toEqual(["unpin", "seal"]);
+	});
+
+	it("preserves error pinning when a transcript rebuild replaces the assistant", async () => {
+		const message = makeAssistantMessage({ stopReason: "error", errorMessage: "blocked" });
+		const { controller } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		const rebuilt = new AssistantMessageComponent(message);
+		controller.inheritAssistantAwaitingSeal(rebuilt);
+		expect(Bun.stripANSI(rebuilt.render(120).join("\n"))).not.toContain("Error: blocked");
+
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		expect(Bun.stripANSI(rebuilt.render(120).join("\n"))).toContain("Error: blocked");
+		await controller.handleEvent({ type: "message_start", message: makeAssistantMessage({ content: [] }) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		expect(rebuilt.isTranscriptBlockSealed()).toBe(true);
+	});
+
+	it("seals a rebuilt predecessor before replacing it at message end", async () => {
+		const first = makeAssistantMessage();
+		const next = makeAssistantMessage({ content: [] });
+		const { controller, ctx } = createFixture(first);
+
+		await controller.handleEvent({ type: "message_end", message: first } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		await controller.handleEvent({ type: "message_start", message: next } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		const rebuiltPredecessor = new AssistantMessageComponent(first);
+		controller.inheritAssistantAwaitingSeal(rebuiltPredecessor);
+		expect(rebuiltPredecessor.isTranscriptBlockSealed()).toBe(false);
+		expect(ctx.streamingComponent).toBeInstanceOf(AssistantMessageComponent);
+
+		await controller.handleEvent({ type: "message_end", message: next } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		expect(rebuiltPredecessor.isTranscriptBlockSealed()).toBe(true);
+	});
+
+	it("drops stale assistant seal and pin anchors when transcript anchors reset", async () => {
+		const message = makeAssistantMessage({ stopReason: "error", errorMessage: "blocked" });
+		const { controller, streamingComponent } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		streamingComponent.sealTranscriptBlock.mockClear();
+		streamingComponent.setErrorPinned.mockClear();
+
+		controller.resetTranscriptAnchors();
+		await controller.handleEvent({
+			type: "message_start",
+			message: makeAssistantMessage({ content: [] }),
+		} as Extract<AgentSessionEvent, { type: "message_start" }>);
+
+		expect(streamingComponent.sealTranscriptBlock).not.toHaveBeenCalled();
+		expect(streamingComponent.setErrorPinned).not.toHaveBeenCalledWith(false);
+	});
+
+	it("attaches mid-turn and routes the first orphaned assistant update to one transcript block", async () => {
+		const { controller: eventController, ctx, chatChildren } = createFixture();
+		const main = makeAttachSessionStub();
+		const worker = makeAttachSessionStub(true);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: worker.session,
+			status: "running",
+		});
+		const lifecycle = new AgentLifecycleManager(registry);
+		const update = makeAssistantMessage({
+			content: [{ type: "text", text: "partial after attach" }],
+		});
+		const rebuilt = new AssistantMessageComponent(update);
+		Object.assign(ctx, {
+			session: main.session,
+			unsubscribe: vi.fn(),
+			eventController,
+			clearTransientSessionUi: vi.fn(),
+			renderInitialMessages: vi.fn(() => {
+				ctx.chatContainer.clear();
+				ctx.chatContainer.addChild(rebuilt);
+				eventController.inheritAssistantAwaitingSeal(rebuilt);
+			}),
+			updateEditorBorderColor: vi.fn(),
+			showStatus: vi.fn(),
+		});
+		Object.assign(ctx.statusLine, { setSession: vi.fn() });
+		const focusController = new SessionFocusController(ctx, registry, () => lifecycle);
+
+		await focusController.focusAgent("Worker");
+		await worker.emit({
+			type: "message_update",
+			message: update,
+			assistantMessageEvent: { type: "text_delta", delta: "partial after attach" },
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+
+		expect(chatChildren).toHaveLength(1);
+		expect(chatChildren[0]).toBe(rebuilt);
+		expect(ctx.streamingComponent).toBe(rebuilt);
+		expect(ctx.streamingMessage).toBe(update);
 	});
 
 	it("clears retryable thinking-loop banners without restoring the dropped inline error", async () => {

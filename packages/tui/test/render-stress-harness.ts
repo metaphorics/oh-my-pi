@@ -8,6 +8,9 @@ import {
 	CURSOR_MARKER,
 	type Focusable,
 	findCommittedPrefixResync,
+	type NativeScrollbackCommittedRows,
+	type NativeScrollbackReplay,
+	type NativeScrollbackVirtualizedPrefix,
 	type OverlayAnchor,
 	type OverlayHandle,
 	type OverlayOptions,
@@ -55,7 +58,8 @@ export type ScenarioTag =
 	| "strictScrollback"
 	| "unknownViewport"
 	| "foregroundStream"
-	| "ed3Risk";
+	| "ed3Risk"
+	| "virtualizedPrefix";
 const ENV_KEYS = [
 	"TMUX",
 	"STY",
@@ -125,7 +129,8 @@ export type OperationKind =
 	| "attachChild"
 	| "detachChild"
 	| "reorderChildren"
-	| "mutateChild";
+	| "mutateChild"
+	| "compactCommittedPrefix";
 
 export const OPERATION_KINDS = [
 	"appendSmall",
@@ -175,6 +180,7 @@ export const OPERATION_KINDS = [
 	"detachChild",
 	"reorderChildren",
 	"mutateChild",
+	"compactCommittedPrefix",
 ] as const satisfies readonly OperationKind[];
 const OPERATION_KIND_SET = new Set<string>(OPERATION_KINDS);
 
@@ -579,7 +585,9 @@ function terminalStressTraits(scenario: Scenario): TerminalStressTraits {
 }
 
 function scenarioTags(
-	template: Pick<Scenario, "envMode" | "terminalMode" | "geometryMode">,
+	template: Pick<Scenario, "envMode" | "terminalMode" | "geometryMode"> & {
+		virtualizedPrefix?: boolean;
+	},
 	strictNativeScrollback: boolean,
 	foregroundStreaming: boolean,
 ): readonly ScenarioTag[] {
@@ -589,6 +597,7 @@ function scenarioTags(
 	if (template.terminalMode !== "normal") tags.push("unknownViewport");
 	if (foregroundStreaming) tags.push("foregroundStream");
 	if (isEd3RiskScenario(template.terminalMode, template.envMode)) tags.push("ed3Risk");
+	if (template.virtualizedPrefix === true) tags.push("virtualizedPrefix");
 	return tags;
 }
 
@@ -983,20 +992,73 @@ function reflowToWidth(lines: readonly string[], width: number): string[] {
 	return out;
 }
 
-class StressComponent implements Component, Focusable {
+class StressComponent
+	implements
+		Component,
+		Focusable,
+		NativeScrollbackCommittedRows,
+		NativeScrollbackReplay,
+		NativeScrollbackVirtualizedPrefix
+{
 	focused = false;
 	#model: StressModel;
 	#reflow: boolean;
+	#virtualizedPrefix: boolean;
+	#committedRows = 0;
+	#virtualizedLineIds = new Set<number>();
+	#virtualizedRowsPending = 0;
+	#onVirtualizedRowsTaken?: (rows: number) => void;
 
-	constructor(model: StressModel, reflow = false) {
+	constructor(
+		model: StressModel,
+		reflow = false,
+		virtualizedPrefix = false,
+		onVirtualizedRowsTaken?: (rows: number) => void,
+	) {
 		this.#model = model;
 		this.#reflow = reflow;
+		this.#virtualizedPrefix = virtualizedPrefix;
+		this.#onVirtualizedRowsTaken = onVirtualizedRowsTaken;
 	}
 
 	invalidate(): void {}
 
+	setNativeScrollbackCommittedRows(rows: number): void {
+		this.#committedRows = Number.isFinite(rows) ? Math.max(0, Math.trunc(rows)) : 0;
+	}
+
+	compactCommittedPrefix(rows: number): number {
+		if (!this.#virtualizedPrefix) return 0;
+		const requested = Number.isFinite(rows) ? Math.max(0, Math.trunc(rows)) : 0;
+		const target = Math.min(requested, Math.max(0, this.#committedRows - this.#virtualizedRowsPending));
+		if (target === 0) return 0;
+		let dropped = 0;
+		for (const line of this.#model.lines) {
+			if (this.#virtualizedLineIds.has(line.id)) continue;
+			this.#virtualizedLineIds.add(line.id);
+			dropped++;
+			if (dropped === target) break;
+		}
+		this.#virtualizedRowsPending += dropped;
+		return dropped;
+	}
+
+	takeNativeScrollbackVirtualizedRows(): number {
+		const rows = this.#virtualizedRowsPending;
+		this.#virtualizedRowsPending = 0;
+		if (rows > 0) this.#onVirtualizedRowsTaken?.(rows);
+		return rows;
+	}
+
+	prepareNativeScrollbackReplay(): void {
+		this.#virtualizedLineIds.clear();
+		this.#virtualizedRowsPending = 0;
+	}
+
 	render(width: number): string[] {
-		const lines = this.#model.renderedLines(width, this.focused);
+		const lines = this.#model
+			.renderedLines(width, this.focused)
+			.filter((_line, index) => !this.#virtualizedLineIds.has(this.#model.lines[index]?.id ?? -1));
 		return this.#reflow ? reflowToWidth(lines, width) : lines;
 	}
 }
@@ -1117,6 +1179,7 @@ class StressDriver {
 	#nextOverlayId = 0;
 	#opLog: OperationLogEntry[] = [];
 	#operationCoverage = new Map<OperationLogKind, number>();
+	#pendingShadowVirtualizedDrops: { start: number; rows: number }[] = [];
 	// Lines that legitimately appeared 2+ times in any committed frame. Native
 	// scrollback retains rows from every past frame — content that leaves the
 	// frame (a detached child, collapsed preview, truncation-colliding rows
@@ -1165,7 +1228,10 @@ class StressDriver {
 		this.#scheduler = new StressRenderScheduler();
 		const maxHeight = maxOf(scenario.heightChoices);
 		this.#model = new StressModel(this.#streams.content, maxHeight + 12, scenario.uniqueContent, "root-");
-		this.#component = new StressComponent(this.#model, scenario.reflow);
+		const virtualizedPrefix = scenario.tags.includes("virtualizedPrefix");
+		this.#component = new StressComponent(this.#model, scenario.reflow, virtualizedPrefix, rows => {
+			this.#pendingShadowVirtualizedDrops.push({ start: 0, rows });
+		});
 		this.#children = [0, 1].map(id => {
 			const model = new StressModel(
 				this.#streams.children,
@@ -1214,6 +1280,17 @@ class StressDriver {
 			this.#shadowFrameWidth = width;
 			this.#shadowFrameHeight = this.#term.rows;
 			this.#shadowFrameOverlay = this.#tui.hasOverlay();
+			let virtualizedShift = 0;
+			for (const drop of this.#pendingShadowVirtualizedDrops) {
+				const at = drop.start - virtualizedShift;
+				const rows = Math.min(drop.rows, Math.max(0, this.#shadowCommitted - at));
+				if (rows <= 0) continue;
+				this.#shadowRawPrefix.splice(at, rows);
+				this.#shadowCommitted -= rows;
+				this.#shadowWindowTop = Math.max(0, this.#shadowWindowTop - rows);
+				virtualizedShift += rows;
+			}
+			this.#pendingShadowVirtualizedDrops.length = 0;
 			// Mirror the engine's render-time ledger transitions here: the audit
 			// resync and the shrink-into-prefix re-anchor can both fire on frames
 			// that emit zero bytes, which the write hook would never observe.
@@ -1285,6 +1362,16 @@ class StressDriver {
 
 				if ((index + 1) % 50 === 0) {
 					await this.#checkpoint(index, "periodicCheckpoint");
+				}
+			}
+			if (
+				this.#scenario.replayOperations === undefined &&
+				this.#scenario.iterations >= 3 &&
+				this.#scenario.tags.includes("virtualizedPrefix")
+			) {
+				const count = this.#operationCoverage.get("compactCommittedPrefix") ?? 0;
+				if (count < 1) {
+					throw new Error(`virtualizedPrefix scenario executed ${count} compactCommittedPrefix operations`);
 				}
 			}
 		} finally {
@@ -1376,6 +1463,9 @@ class StressDriver {
 		if (this.#traits.strictNativeScrollback && before.atBottom && index % 41 === 0) {
 			return "offscreenEditAppendRepeatedTail";
 		}
+		if (this.#scenario.tags.includes("virtualizedPrefix") && index === 2) {
+			return "compactCommittedPrefix";
+		}
 		if (!before.atBottom && this.#streams.ops.chance(0.28)) {
 			return "scrollToBottom";
 		}
@@ -1440,6 +1530,10 @@ class StressDriver {
 			{ item: "detachChild", weight: this.#children.some(child => child.active) ? 2 : 0 },
 			{ item: "reorderChildren", weight: this.#children.filter(child => child.active).length > 1 ? 1 : 0 },
 			{ item: "mutateChild", weight: this.#children.some(child => child.active) ? 3 : 0 },
+			{
+				item: "compactCommittedPrefix",
+				weight: this.#scenario.tags.includes("virtualizedPrefix") ? 4 : 0,
+			},
 		];
 		return weightedPick(this.#streams.ops, weighted);
 	}
@@ -1540,9 +1634,19 @@ class StressDriver {
 				return await this.#reorderChildren();
 			case "mutateChild":
 				return await this.#mutateChild();
+			case "compactCommittedPrefix":
+				return await this.#compactCommittedPrefix();
 			default:
 				return assertNever(kind);
 		}
+	}
+
+	async #compactCommittedPrefix(): Promise<AppliedOperation> {
+		const requested = this.#streams.ops.int(1, Math.max(1, this.#term.rows * 2));
+		const dropped = this.#component.compactCommittedPrefix(requested);
+		this.#tui.requestRender();
+		await this.#settle();
+		return contentOperation("compactCommittedPrefix", { requested, dropped }, false);
 	}
 
 	async #applyContent(
@@ -3549,6 +3653,7 @@ type ScenarioTemplate = Omit<
 	uniqueContent?: boolean;
 	foregroundStream?: boolean;
 	reflow?: boolean;
+	virtualizedPrefix?: boolean;
 };
 
 function writeReplayLog(scenario: Scenario, operations: readonly OperationLogEntry[]): string {
@@ -3611,6 +3716,7 @@ function coreTemplates(): ScenarioTemplate[] {
 			rows: 12,
 			widthChoices: [40, 80, 120],
 			heightChoices: [12, 24],
+			virtualizedPrefix: true,
 		},
 		{
 			name: "win32-intermittentUnknown-small",
@@ -3679,6 +3785,7 @@ function coreTemplates(): ScenarioTemplate[] {
 			widthChoices: [10, 16, 32],
 			heightChoices: [3, 4, 6],
 			scrollbackRows: 10_000,
+			virtualizedPrefix: true,
 		},
 		{
 			// WSL fronted by Windows Terminal (#1610): the viewport probe is

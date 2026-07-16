@@ -4,6 +4,7 @@ import {
 	type NativeScrollbackCommittedRows,
 	type NativeScrollbackLiveRegion,
 	type NativeScrollbackReplay,
+	type NativeScrollbackVirtualizedPrefix,
 	type RenderStablePrefix,
 	type ViewportTailProvider,
 } from "@oh-my-pi/pi-tui";
@@ -16,6 +17,12 @@ import {
  */
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
+	/**
+	 * A sealed block declares post-finalize version bumps cosmetic: updates after
+	 * sealing remain visible for one composed frame before compaction. Mutations
+	 * after its rows enter native scrollback remain invisible.
+	 */
+	isTranscriptBlockSealed?(): boolean;
 	/**
 	 * Monotonic content version for blocks that can still mutate *after*
 	 * reporting finalized (e.g. `AssistantMessageComponent`: the inline error
@@ -58,6 +65,11 @@ interface FinalizableBlock {
 function isBlockFinalized(child: Component): boolean {
 	const fn = (child as Component & FinalizableBlock).isTranscriptBlockFinalized;
 	return fn ? fn.call(child) : true;
+}
+
+function isBlockSealed(child: Component): boolean {
+	const fn = (child as Component & FinalizableBlock).isTranscriptBlockSealed;
+	return fn ? fn.call(child) : false;
 }
 
 function getBlockVersion(child: Component): number | undefined {
@@ -165,9 +177,11 @@ export class TranscriptContainer
 		NativeScrollbackLiveRegion,
 		NativeScrollbackCommittedRows,
 		NativeScrollbackReplay,
+		NativeScrollbackVirtualizedPrefix,
 		RenderStablePrefix,
 		ViewportTailProvider
 {
+	#childIndex = new Map<Component, number>();
 	// Bumped to retire every block segment at once (theme change / clear); a
 	// segment is only reused when its stored generation matches.
 	#generation = 0;
@@ -188,10 +202,20 @@ export class TranscriptContainer
 	// from the local frame. Children remain owned by the session and can be
 	// re-rendered when the TUI prepares a destructive full replay.
 	#compactedChildStart = 0;
-	// Suppresses re-compaction for the rehydrating render. The TUI feeds its old
-	// committed-row count immediately before render, so resetting that count
-	// alone cannot distinguish a replay from an ordinary update.
+	// Suppresses compaction across the whole destructive-replay transaction.
+	// The TUI feeds its old committed-row count immediately before render, so
+	// resetting that count alone cannot distinguish a replay from an ordinary
+	// update. The latch survives every pre-emit render (a Ghostty-deferred
+	// frame recomposes before emitting) and releases only when the post-emit
+	// committed-rows publication delivers the rehydrated full-paint
+	// coordinates: a first-time compaction inside the replay transaction would
+	// drop rows the ED3 erase just removed from native scrollback.
 	#replayPending = false;
+	// Whether render() ran since the latch was set: distinguishes the
+	// pre-render committed-rows feed (keep suppressing) from the post-emit
+	// publication (release).
+	#replayRendered = false;
+	#virtualizedRowsPending = 0;
 	// Stable-prefix floor accumulated across renders since the last
 	// getRenderStablePrefixRows() read (see RenderStablePrefix: reading
 	// consumes the report and re-bases the baseline). Out-of-band renders
@@ -204,16 +228,43 @@ export class TranscriptContainer
 		super.invalidate();
 	}
 
+	override addChild(component: Component): void {
+		this.#childIndex.set(component, this.children.length);
+		super.addChild(component);
+	}
+
+	override removeChild(component: Component): void {
+		const index = this.#childIndex.get(component);
+		if (index === undefined) return;
+		super.removeChild(component);
+		this.#childIndex.delete(component);
+		for (let i = index; i < this.children.length; i++) {
+			const child = this.children[i];
+			if (child !== undefined) this.#childIndex.set(child, i);
+		}
+		if (index < this.#compactedChildStart) this.#compactedChildStart--;
+		if (index < this.#segments.length) this.#segments.splice(index, 1);
+	}
+
 	override clear(): void {
 		this.#generation++;
 		super.clear();
+		this.#childIndex.clear();
 		this.#compactedChildStart = 0;
 		this.#committedRows = 0;
+		this.#virtualizedRowsPending = 0;
 		this.#replayPending = false;
+		this.#replayRendered = false;
 	}
 
 	override setNativeScrollbackCommittedRows(rows: number): void {
 		this.#committedRows = Number.isFinite(rows) ? Math.max(0, Math.trunc(rows)) : 0;
+		if (this.#replayPending && this.#replayRendered) {
+			// Post-emit publication: the destructive replay transaction is
+			// complete and the rehydrated coordinates are now authoritative.
+			this.#replayPending = false;
+			this.#replayRendered = false;
+		}
 		for (let i = this.#compactedChildStart; i < this.children.length; i++) {
 			const child = this.children[i]!;
 			const segment = this.#segments[i];
@@ -241,12 +292,22 @@ export class TranscriptContainer
 		// Replay retires the old terminal tape, so descendants may discard layout
 		// locks whose only purpose was keeping that immutable history byte-stable.
 		super.prepareNativeScrollbackReplay();
+		this.#virtualizedRowsPending = 0;
+		// Latch unconditionally: even a container that never compacted must not
+		// perform its first compaction inside the replay transaction (see the
+		// #replayPending field contract).
+		this.#replayPending = true;
+		this.#replayRendered = false;
 		if (this.#compactedChildStart === 0) return;
 		this.#compactedChildStart = 0;
-		this.#replayPending = true;
 		this.#generation++;
 		this.#lines.length = 0;
 		this.#stableRowsFloor = 0;
+	}
+	takeNativeScrollbackVirtualizedRows(): number {
+		const rows = this.#virtualizedRowsPending;
+		this.#virtualizedRowsPending = 0;
+		return rows;
 	}
 
 	getRenderStablePrefixRows(): number {
@@ -269,13 +330,14 @@ export class TranscriptContainer
 	 * committed rows and is safely removable.
 	 */
 	isBlockUncommitted(component: Component): boolean {
-		const index = this.children.indexOf(component);
+		const index = this.#childIndex.get(component);
 		// Compacted prefix is already committed native history and must not be
 		// retracted. Compacted slots may be sparse holes after a later re-render
 		// (render only fills from #compactedChildStart), so the loop below must
 		// skip undefined entries.
-		if (index >= 0 && index < this.#compactedChildStart) return false;
-		for (const segment of this.#segments) {
+		if (index !== undefined && index < this.#compactedChildStart) return false;
+		for (let i = this.#compactedChildStart; i < this.#segments.length; i++) {
+			const segment = this.#segments[i];
 			if (segment === undefined || segment.component !== component) continue;
 			return segment.rowCount === 0 || segment.startRow >= this.#committedRows;
 		}
@@ -293,9 +355,10 @@ export class TranscriptContainer
 	 */
 	isBlockInLiveRegion(component: Component): boolean {
 		const children = this.children;
-		const index = children.indexOf(component);
-		if (index < 0) return false;
-		for (let i = 0; i <= index; i++) {
+		const index = this.#childIndex.get(component);
+		if (index === undefined) return false;
+		if (index < this.#compactedChildStart) return false;
+		for (let i = this.#compactedChildStart; i <= index; i++) {
 			if (!isBlockFinalized(children[i]!)) return true;
 		}
 		// Every block at/before `index` finalized: the live region starts at the
@@ -453,7 +516,11 @@ export class TranscriptContainer
 					previous.width === width &&
 					previous.generation === this.#generation);
 			const contribution = reusable ? previous.contribution : stripPlainBlankEdges(raw);
-			const compactable = finalized && version === undefined && previous?.finalized !== false;
+			const compactable =
+				finalized &&
+				(version === undefined || isBlockSealed(child)) &&
+				previous?.finalized !== false &&
+				(version === undefined || previous?.version === version);
 
 			// Empty (or stripped-to-nothing) children contribute nothing and never
 			// affect spacing. An empty still-live child still gates the commit
@@ -541,7 +608,7 @@ export class TranscriptContainer
 		this.#segments = segments;
 		this.#stableRowsFloor = Math.min(stableFloorBefore, stableRows, row);
 		if (this.#replayPending) {
-			this.#replayPending = false;
+			this.#replayRendered = true;
 		} else {
 			this.#compactCommittedPrefix();
 		}
@@ -576,6 +643,7 @@ export class TranscriptContainer
 			}
 		}
 		if (dropRows === 0) return;
+		this.#virtualizedRowsPending += dropRows;
 
 		lines.splice(0, dropRows);
 		for (let i = this.#compactedChildStart; i < dropUntil; i++) {

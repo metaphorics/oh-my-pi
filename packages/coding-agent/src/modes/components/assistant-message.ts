@@ -176,6 +176,7 @@ export class AssistantMessageComponent extends Container {
 	#showImages = true;
 	#kittyConversionsInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
+	#sealed = false;
 	/**
 	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
 	 * ASCII form resolves asynchronously and can re-layout rows that already
@@ -405,6 +406,19 @@ export class AssistantMessageComponent extends Container {
 
 	isTranscriptBlockFinalized(): boolean {
 		return this.#transcriptBlockFinalized;
+	}
+
+	/**
+	 * Declare this finalized block eligible for transcript prefix compaction.
+	 * Updates after sealing remain visible for one composed frame before
+	 * compaction; mutations after its rows enter native scrollback are invisible.
+	 */
+	sealTranscriptBlock(): void {
+		this.#sealed = true;
+	}
+
+	isTranscriptBlockSealed(): boolean {
+		return this.#sealed;
 	}
 
 	/**

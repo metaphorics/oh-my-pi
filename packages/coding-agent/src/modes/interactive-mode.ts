@@ -3772,6 +3772,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	resetTranscript(): void {
+		this.eventController?.resetTranscriptAnchors();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
 	}

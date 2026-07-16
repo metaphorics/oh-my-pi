@@ -23,6 +23,7 @@ import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
+import { sessionMessagePersistenceKey } from "../../session/turn-persistence";
 import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../../tools/resolve";
 import { nextActionableTask } from "../../tools/todo";
@@ -84,6 +85,9 @@ export class EventController {
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#toolTimelineComponents = new Map<string, Component>();
 	#postToolAssistantComponents = new Map<string, AssistantMessageComponent>();
+	// Finalized tail of the preceding assistant message. It survives turn cleanup
+	// so the next assistant message can seal it after agent_start restores any
+	// pinned inline error.
 	#lastAssistantComponent: AssistantMessageComponent | undefined = undefined;
 	// Assistant component whose turn-ending error is currently mirrored in the
 	// pinned banner. Its inline `Error: …` line is suppressed while pinned and
@@ -264,12 +268,13 @@ export class EventController {
 		const children = this.ctx.chatContainer.children;
 		const anchorIndex = anchor ? children.indexOf(anchor) : -1;
 		if (anchorIndex < 0) return false;
-		if (children.slice(anchorIndex + 1).some(child => !this.ctx.chatContainer.isBlockUncommitted(child))) {
+		const trailing = children.slice(anchorIndex + 1);
+		if (trailing.some(child => !this.ctx.chatContainer.isBlockUncommitted(child))) {
 			return false;
 		}
+		for (const child of trailing) this.ctx.chatContainer.removeChild(child);
 		this.ctx.chatContainer.addChild(component);
-		children.splice(children.length - 1, 1);
-		children.splice(anchorIndex + 1, 0, component);
+		for (const child of trailing) this.ctx.chatContainer.addChild(child);
 		return true;
 	}
 
@@ -412,7 +417,6 @@ export class EventController {
 		this.#readToolCallAssistantComponents.clear();
 		this.#resetReadGroup();
 		this.#resolveDisplaceableTodo();
-		this.#lastAssistantComponent = undefined;
 		// Restore the previous turn's inline error in the transcript before dropping
 		// the banner, so the error stays in history once the banner is gone.
 		this.#pinnedErrorComponent?.setErrorPinned(false);
@@ -502,6 +506,8 @@ export class EventController {
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "assistant") {
 			this.#lastVisibleBlockCount = 0;
+			this.#lastAssistantComponent?.sealTranscriptBlock();
+			this.#lastAssistantComponent = undefined;
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingMessage = event.message;
 			this.ctx.chatContainer.addChild(this.ctx.streamingComponent);
@@ -631,6 +637,37 @@ export class EventController {
 	 */
 	inheritDisplaceableTodo(component: ToolExecutionComponent | null | undefined): void {
 		this.#displaceableTodoComponent = component?.canBeDisplacedBy("todo") ? component : undefined;
+	}
+
+	/**
+	 * Rebind the unsealed historical tail after a transcript rebuild replaces
+	 * component instances. A pinned error follows the same rebuilt assistant so
+	 * agent_start restores its inline row before the next message seals it.
+	 */
+	inheritAssistantAwaitingSeal(component: AssistantMessageComponent | undefined): void {
+		const hadPinnedError = this.#pinnedErrorComponent !== undefined;
+		this.#lastAssistantComponent = component;
+		if (hadPinnedError) {
+			component?.setErrorPinned(true);
+			this.#pinnedErrorComponent = component;
+		}
+	}
+
+	/**
+	 * Reuse a rebuilt assistant when focus attaches after its message_start.
+	 * The full persistence identity prevents a completed predecessor from being
+	 * mistaken for the in-flight message that produced the orphaned update.
+	 */
+	resumeAssistantStream(message: AssistantMessage): boolean {
+		const component = this.#lastAssistantComponent;
+		const persistenceKey = sessionMessagePersistenceKey(message);
+		if (!component || component.messagePersistenceKey() !== persistenceKey) return false;
+		this.#lastVisibleBlockCount = 0;
+		this.#lastAssistantComponent = undefined;
+		this.ctx.streamingComponent = component;
+		this.ctx.streamingMessage = message;
+		this.#streamingReveal.begin(component, splitAssistantMessageToolTimeline(message).beforeTools);
+		return true;
 	}
 
 	async #handleNotice(event: Extract<AgentSessionEvent, { type: "notice" }>): Promise<void> {
@@ -903,13 +940,19 @@ export class EventController {
 				this.ctx.lastAssistantUsage = usage;
 			}
 			this.ctx.streamingComponent.markTranscriptBlockFinalized();
-			let lastPostToolAssistantComponent: AssistantMessageComponent | undefined;
+			let lastAssistantComponent = this.ctx.streamingComponent;
 			for (const [toolCallId, segment] of displayTimeline.afterToolCalls) {
 				const component = this.#upsertPostToolAssistantSegment(toolCallId, segment);
 				component?.markTranscriptBlockFinalized();
-				if (component) lastPostToolAssistantComponent = component;
+				if (component) {
+					lastAssistantComponent.sealTranscriptBlock();
+					lastAssistantComponent = component;
+				}
 			}
-			this.#lastAssistantComponent = lastPostToolAssistantComponent ?? this.ctx.streamingComponent;
+			if (this.#lastAssistantComponent && this.#lastAssistantComponent !== lastAssistantComponent) {
+				this.#lastAssistantComponent.sealTranscriptBlock();
+			}
+			this.#lastAssistantComponent = lastAssistantComponent;
 			if (settings.get("display.showTokenUsage") && assistantUsageIsBilled(event.message.usage)) {
 				this.ctx.chatContainer.addChild(
 					createUsageRowBlock(event.message.usage, event.message.duration, event.message.ttft),
@@ -1188,7 +1231,6 @@ export class EventController {
 		this.#resolveDisplaceablePoll();
 		this.#resolveDisplaceableTodo();
 		this.ctx.flushPendingCommandOutput();
-		this.#lastAssistantComponent = undefined;
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
 		this.#scheduleIdleRecap();

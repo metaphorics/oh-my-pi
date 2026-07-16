@@ -71,6 +71,7 @@ function makeHarness(): Harness {
 			handleEvent: async (event: unknown) => {
 				handledEvents.push(event);
 			},
+			resumeAssistantStream: () => false,
 			resetTranscriptAnchors: () => {
 				resetTranscriptAnchors++;
 			},

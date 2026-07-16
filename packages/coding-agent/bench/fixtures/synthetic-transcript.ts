@@ -114,6 +114,7 @@ export function buildSyntheticComponents(n: number, options?: { mutableTail?: bo
 			const msg = makeAssistantMessage(`${ASSISTANT_BODY}\n\nseq=${seq}`);
 			const c = new AssistantMessageComponent(msg);
 			if (!c.isTranscriptBlockFinalized()) c.markTranscriptBlockFinalized();
+			c.sealTranscriptBlock();
 			components.push(c);
 			remaining -= 1;
 			seq += 1;

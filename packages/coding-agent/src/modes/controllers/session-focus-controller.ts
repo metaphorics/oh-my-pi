@@ -88,17 +88,18 @@ export class SessionFocusController {
 		this.ctx.clearTransientSessionUi();
 		this.ctx.eventController.resetTranscriptAnchors();
 		// Orphan-delta guard: when attaching mid-turn the message_start for the
-		// in-flight assistant message predates the attach. message_update carries
-		// the full accumulating message, so synthesize the missing start before
-		// the first orphaned update; every other handler is tolerant of unknown
-		// anchors (guarded by streamingComponent/pendingTools lookups).
+		// in-flight assistant predates the attach. Reuse an identity-matching
+		// rebuilt block when available; otherwise synthesize the missing start.
+		// Every other handler tolerates unknown anchors via its own lookups.
 		let assistantStreamSynced = false;
 		this.ctx.unsubscribe = target.subscribe(async event => {
 			if (event.type === "message_start" && event.message.role === "assistant") {
 				assistantStreamSynced = true;
 			} else if (event.type === "message_update" && event.message.role === "assistant" && !assistantStreamSynced) {
 				assistantStreamSynced = true;
-				await this.ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+				if (!this.ctx.eventController.resumeAssistantStream(event.message)) {
+					await this.ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+				}
 			}
 			await this.ctx.eventController.handleEvent(event);
 		});

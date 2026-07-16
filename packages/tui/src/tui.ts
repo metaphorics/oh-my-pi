@@ -216,9 +216,24 @@ export interface NativeScrollbackCommittedRows {
 export interface NativeScrollbackReplay {
 	prepareNativeScrollbackReplay(): void;
 }
+/**
+ * A component that virtualizes rows already recorded in native scrollback
+ * reports how many rows it dropped from the top of its committed sub-range.
+ * The count is consumed on read and is expressed in the component's previous
+ * engine-observed render coordinates. Drops between takes must concatenate
+ * into a prefix of that committed sub-range.
+ */
+export interface NativeScrollbackVirtualizedPrefix {
+	takeNativeScrollbackVirtualizedRows(): number;
+}
 
 function prepareNativeScrollbackReplay(component: Component): void {
 	(component as Component & Partial<NativeScrollbackReplay>).prepareNativeScrollbackReplay?.();
+}
+function takeNativeScrollbackVirtualizedRows(component: Component): number {
+	return (
+		(component as Component & Partial<NativeScrollbackVirtualizedPrefix>).takeNativeScrollbackVirtualizedRows?.() ?? 0
+	);
 }
 
 function setNativeScrollbackCommittedRows(component: Component, rows: number): void {
@@ -1027,6 +1042,8 @@ export class TUI extends Container {
 	// snapshot (duplication, never loss). Re-based on full paints / shrinks /
 	// geometry frames.
 	#committedPrefixAuditRows = 0;
+	#pendingVirtualizedDrops: { start: number; rows: number }[] = [];
+	#virtualizedRowsEpochTotal = 0;
 	// Frame row currently mapped to screen row 0. Monotonic between full
 	// paints: a shrink never re-exposes scrolled-off rows (they cannot be
 	// un-scrolled without rewriting history); live rows repaint at fixed
@@ -1202,6 +1219,13 @@ export class TUI extends Container {
 				// deliberately NOT read — their baseline must stay anchored to
 				// the last render the engine actually observed.
 				reported = getRenderStablePrefixRows(child);
+				const virtualizedRows = takeNativeScrollbackVirtualizedRows(child);
+				if (virtualizedRows > 0) {
+					this.#pendingVirtualizedDrops.push({
+						start: prevStart,
+						rows: Math.min(virtualizedRows, prevRows),
+					});
+				}
 			}
 			// Topmost seam wins. Commits are prefix-only: the first child that
 			// reports a live region already bounds everything below it, so a
@@ -2827,6 +2851,22 @@ export class TUI extends Container {
 			rawFrame = this.render(width);
 			this.#imageBudget.endPass();
 		}
+		let virtualizedShift = 0;
+		for (const drop of this.#pendingVirtualizedDrops) {
+			const at = drop.start - virtualizedShift;
+			const rows = Math.min(drop.rows, Math.max(0, this.#committedRows - at));
+			if (rows <= 0) continue;
+			this.#committedPrefix.splice(at, rows);
+			this.#committedRows -= rows;
+			this.#committedPrefixAuditRows =
+				at < this.#committedPrefixAuditRows
+					? Math.max(at, this.#committedPrefixAuditRows - rows)
+					: this.#committedPrefixAuditRows;
+			this.#windowTopRow = Math.max(0, this.#windowTopRow - rows);
+			virtualizedShift += rows;
+			this.#virtualizedRowsEpochTotal += rows;
+		}
+		this.#pendingVirtualizedDrops.length = 0;
 		// Ghostty initial-image deferral must run before any render state is
 		// consumed (#resizeEventPending, hardware-cursor state, commit
 		// re-anchoring): the early return abandons this frame and the deferred
@@ -2952,13 +2992,27 @@ export class TUI extends Container {
 		// instead of recommitting the final form below the stale fragment
 		// (a visibly duplicated block). Multiplexer panes cannot ED3 safely
 		// and keep the repair-below fallback in the branches under this one.
+		const divergenceDetected = committedRowsResynced || frameLength <= this.#committedRows;
 		const divergenceRebuild =
 			this.#scrollbackRebuildEnabled &&
 			!firstPaint &&
 			!replaceRequested &&
 			!geometryChanged &&
 			!isMultiplexerSession() &&
-			(committedRowsResynced || frameLength <= this.#committedRows);
+			divergenceDetected &&
+			this.#virtualizedRowsEpochTotal === 0;
+		if (
+			this.#scrollbackRebuildEnabled &&
+			!firstPaint &&
+			!replaceRequested &&
+			!geometryChanged &&
+			!isMultiplexerSession() &&
+			divergenceDetected &&
+			this.#virtualizedRowsEpochTotal > 0
+		) {
+			this.#clearScrollbackOnNextRender = true;
+			this.requestRender();
+		}
 		const fullPaint = firstPaint || replaceRequested || geometryRebuild || divergenceRebuild;
 		let windowTop: number;
 		let chunkTo: number;
@@ -3073,6 +3127,8 @@ export class TUI extends Container {
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
 			this.#committedPrefixAuditRows = Math.min(chunkTo, finalBoundary);
 			this.#clearScrollbackOnNextRender = false;
+			this.#virtualizedRowsEpochTotal = 0;
+			this.#pendingVirtualizedDrops.length = 0;
 			this.#hasEverRendered = true;
 			this.#publishCommittedRows();
 			if (!firstPaint && frameLength > height) this.#armPostFullPaintSettle();
