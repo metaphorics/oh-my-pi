@@ -6251,6 +6251,9 @@ export class AgentSession {
 	}
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
+		// Phase A (sequential): mark dispose, emit session_shutdown, abort in-flight
+		// post-prompt work, then bound the post-prompt drain. Writers that can still
+		// append session entries must finish before Phase C's sessionManager.close().
 		this.beginDispose();
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
@@ -6278,101 +6281,182 @@ export class AgentSession {
 		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
 		this.agent.abort();
-		await postPromptDrain;
-		// Cancel jobs this agent registered so a subagent's teardown doesn't
-		// leak its background bash/task work into the parent's manager. Only
-		// the session that owns the manager goes on to dispose it (which itself
-		// nukes any leftover jobs and pending deliveries).
-		this.#cancelOwnAsyncJobs();
-		const ownedAsyncManager = this.#ownedAsyncJobManager;
-		if (ownedAsyncManager) {
-			const drained = await ownedAsyncManager.dispose({ timeoutMs: 3_000 });
-			const deliveryState = ownedAsyncManager.getDeliveryState();
-			if (drained === false && deliveryState) {
-				logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
-			}
-			if (AsyncJobManager.instance() === ownedAsyncManager) {
-				AsyncJobManager.setInstance(undefined);
+		// Bound the drain: tasks are already aborted; a hang past 5s was the historical
+		// /exit freeze. This is a hang-fix, not a flush drop — unexpected errors rethrow.
+		const postPromptDrainTimeoutMessage = "Timed out draining post-prompt tasks during dispose";
+		try {
+			await withTimeout(postPromptDrain, 5_000, postPromptDrainTimeoutMessage);
+		} catch (error) {
+			if (error instanceof Error && error.message === postPromptDrainTimeoutMessage) {
+				logger.warn("Post-prompt tasks still draining at dispose deadline");
+			} else {
+				throw error;
 			}
 		}
-		const evalExecutionsSettled = await this.#prepareEvalExecutionsForDispose();
-		if (!evalExecutionsSettled) {
-			logger.warn("Detaching retained eval-kernel ownership during dispose while eval execution is still active");
-		}
-		await disposeKernelSessionsByOwner(this.#evalKernelOwnerId);
-		await disposeRubyKernelSessionsByOwner(this.#evalKernelOwnerId);
-		await disposeJuliaKernelSessionsByOwner(this.#evalKernelOwnerId);
-		// Release headless / spawned Chromium and worker tabs this session
-		// opened via the browser tool. The tool's `tabs`/`browsers` maps are
-		// module-global — subagents and future sessions share them — so we
-		// walk by `ownerSessionId` (assigned at `acquireTab` creation, never on
-		// reuse) and touch only what THIS session created. Bounded so a broken
-		// CDP close cannot stall `/exit`; mirrors the async-job/MCP pattern.
-		// (Issue #3963.)
+
+		// Capture state needed by Phase B branches before the barrier. Hindsight
+		// flush must still observe getHindsightSessionState() === hindsightState;
+		// clear the pointer only in Phase C after the barrier settles.
+		const hindsightState = this.getHindsightSessionState();
 		const browserOwnerId = this.sessionManager.getSessionId();
-		if (browserOwnerId) {
-			try {
-				const released = await withTimeout(
-					releaseTabsForOwner(browserOwnerId, { kill: true }),
-					3_000,
-					"Timed out releasing owned browser tabs during dispose",
-				);
-				if (released > 0) {
-					logger.debug("Released owned browser tabs during dispose", { ownerId: browserOwnerId, released });
+		const mnemopiState = setMnemopiSessionState(this, undefined);
+		const mnemopiConsolidateTimeoutMs = options.mnemopiConsolidateTimeoutMs;
+
+		// Phase B: independent subsystem teardown runs concurrently under one
+		// allSettled barrier. Each branch keeps its existing inner timeout/log
+		// behavior. Writers (async-job delivery drain, Hindsight flush, mnemopi
+		// dispose) complete before Phase C's sessionManager.close().
+		const phaseBResults = await Promise.allSettled([
+			// Async jobs: cancel this agent, dispose the owned manager (3s), clear singleton.
+			(async () => {
+				// Cancel jobs this agent registered so a subagent's teardown doesn't
+				// leak its background bash/task work into the parent's manager. Only
+				// the session that owns the manager goes on to dispose it (which itself
+				// nukes any leftover jobs and pending deliveries).
+				this.#cancelOwnAsyncJobs();
+				const ownedAsyncManager = this.#ownedAsyncJobManager;
+				if (ownedAsyncManager) {
+					// Clear the process-global singleton even when dispose rejects so a
+					// failed owned teardown cannot leave a dead manager installed for
+					// later top-level sessions / task async routing.
+					try {
+						const drained = await ownedAsyncManager.dispose({ timeoutMs: 3_000 });
+						const deliveryState = ownedAsyncManager.getDeliveryState();
+						if (drained === false && deliveryState) {
+							logger.warn("Async job completion deliveries still pending during dispose", {
+								...deliveryState,
+							});
+						}
+					} finally {
+						if (AsyncJobManager.instance() === ownedAsyncManager) {
+							AsyncJobManager.setInstance(undefined);
+						}
+					}
 				}
-			} catch (error) {
-				logger.warn("Failed to release owned browser tabs during dispose", { error: String(error) });
+			})(),
+			// Eval settle then three independent kernel-language disposes.
+			(async () => {
+				const evalExecutionsSettled = await this.#prepareEvalExecutionsForDispose();
+				if (!evalExecutionsSettled) {
+					logger.warn(
+						"Detaching retained eval-kernel ownership during dispose while eval execution is still active",
+					);
+				}
+				await Promise.all([
+					disposeKernelSessionsByOwner(this.#evalKernelOwnerId),
+					disposeRubyKernelSessionsByOwner(this.#evalKernelOwnerId),
+					disposeJuliaKernelSessionsByOwner(this.#evalKernelOwnerId),
+				]);
+			})(),
+			// Browser tabs: bounded 3s CDP close (issue #3963).
+			(async () => {
+				// Release headless / spawned Chromium and worker tabs this session
+				// opened via the browser tool. The tool's `tabs`/`browsers` maps are
+				// module-global — subagents and future sessions share them — so we
+				// walk by `ownerSessionId` (assigned at `acquireTab` creation, never on
+				// reuse) and touch only what THIS session created. Bounded so a broken
+				// CDP close cannot stall `/exit`; mirrors the async-job/MCP pattern.
+				// (Issue #3963.)
+				if (!browserOwnerId) return;
+				try {
+					const released = await withTimeout(
+						releaseTabsForOwner(browserOwnerId, { kill: true }),
+						3_000,
+						"Timed out releasing owned browser tabs during dispose",
+					);
+					if (released > 0) {
+						logger.debug("Released owned browser tabs during dispose", {
+							ownerId: browserOwnerId,
+							released,
+						});
+					}
+				} catch (error) {
+					logger.warn("Failed to release owned browser tabs during dispose", { error: String(error) });
+				}
+			})(),
+			// Tiny title client shutdown (no explicit timeout).
+			shutdownTinyTitleClient(),
+			// MCP owned-manager disconnect: bounded 3s, best-effort.
+			(async () => {
+				// Disconnect the MCP manager this session OWNS so its stdio servers are
+				// not orphaned at exit. Best-effort: a failure here must never throw out
+				// of dispose. Only owning (top-level) sessions provide this callback;
+				// subagents reuse a parent's manager and must not tear it down. Idempotent
+				// with the deferred-discovery disconnect in `createAgentSession`.
+				//
+				// BOUNDED: an owned manager may hold an HTTP/SSE server whose session-
+				// termination DELETE blocks up to the MCP request timeout (30s default,
+				// unbounded when OMP_MCP_TIMEOUT_MS=0), so awaiting `disconnectAll()`
+				// unbounded would stall /exit and print-mode shutdown on a broken remote
+				// endpoint. Race it against a short deadline — stdio close (the subprocess
+				// reap this targets) completes well within the bound; a slow transport
+				// close is left to finish detached. Mirrors the bounded async-job teardown.
+				if (!this.#disconnectOwnedMcpManager) return;
+				try {
+					await withTimeout(
+						this.#disconnectOwnedMcpManager(),
+						3_000,
+						"Timed out disconnecting owned MCP manager during dispose",
+					);
+				} catch (error) {
+					logger.warn("Failed to disconnect owned MCP manager during dispose", { error: String(error) });
+				}
+			})(),
+			// beginDispose() stopped the advisor and captured its recorder close; await
+			// it so the final advisor turn is flushed before the process may exit.
+			Promise.resolve(this.#advisorRecorderClosed),
+			// Hindsight retain flush is unbounded by decision (no data loss). Must complete
+			// before Phase C clears the session pointer — identity check in #doFlush.
+			// Flush the retain queue BEFORE clearing the session's pointer so
+			// `HindsightRetainQueue.#doFlush` still sees `session.getHindsightSessionState() === state`.
+			// Reversed, the spliced batch survives just long enough to fail the
+			// identity check and get dropped with a `session vanished` warning.
+			(async () => {
+				await hindsightState?.flushRetainQueue();
+			})(),
+			// Mnemopi dispose then embed shutdown as one sequential branch (#3031).
+			// Pointer was cleared before the barrier so other code cannot observe a
+			// half-disposed state across concurrent branches.
+			(async () => {
+				// Embed shutdown must run even when state.dispose rejects: consolidate
+				// failure must not leave the embeddings worker alive after session exit.
+				// Normal order remains dispose-then-shutdown so consolidate can still embed.
+				try {
+					await mnemopiState?.dispose({ timeoutMs: mnemopiConsolidateTimeoutMs });
+				} finally {
+					// Tear down the embeddings subprocess AFTER mnemopi state.dispose:
+					// consolidate-on-dispose may still call `embed()` to store the final
+					// memories, and that round-trips through the worker we are about to
+					// hard-kill (issue #3031).
+					await shutdownMnemopiEmbedClient();
+				}
+			})(),
+		]);
+
+		// allSettled contains rejections that branch try/catch did not already
+		// log (e.g. async-job dispose, advisor recorder, hindsight flush). Keep
+		// dispose non-throwing for expected subsystem failures but surface them.
+		for (const result of phaseBResults) {
+			if (result.status === "rejected") {
+				logger.warn("Session dispose subsystem failed during parallel teardown", {
+					error: String(result.reason),
+				});
 			}
 		}
-		await shutdownTinyTitleClient();
+
+		// Phase C (sequential): power/empty-move cleanup, then session close
+		// (writers-before-close invariant: Phase A + Phase B flushes finished),
+		// provider sessions, Hindsight pointer clear/dispose, agent disconnect.
 		this.#releasePowerAssertion();
 		// Clean up an empty session created by this session's /move so it doesn't accumulate.
 		await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
 		this.#movedFromEmptySessionFile = undefined;
+		// Writers-before-close: async-job deliveries, post-prompt, Hindsight flush,
+		// and mnemopi dispose have all settled under the Phase B barrier above.
 		await this.sessionManager.close();
-		// beginDispose() stopped the advisor and captured its recorder close; await
-		// it so the final advisor turn is flushed before the process may exit.
-		await this.#advisorRecorderClosed;
 		this.#closeAllProviderSessions("dispose");
-		// Disconnect the MCP manager this session OWNS so its stdio servers are
-		// not orphaned at exit. Best-effort: a failure here must never throw out
-		// of dispose. Only owning (top-level) sessions provide this callback;
-		// subagents reuse a parent's manager and must not tear it down. Idempotent
-		// with the deferred-discovery disconnect in `createAgentSession`.
-		//
-		// BOUNDED: an owned manager may hold an HTTP/SSE server whose session-
-		// termination DELETE blocks up to the MCP request timeout (30s default,
-		// unbounded when OMP_MCP_TIMEOUT_MS=0), so awaiting `disconnectAll()`
-		// unbounded would stall /exit and print-mode shutdown on a broken remote
-		// endpoint. Race it against a short deadline — stdio close (the subprocess
-		// reap this targets) completes well within the bound; a slow transport
-		// close is left to finish detached. Mirrors the bounded async-job teardown.
-		if (this.#disconnectOwnedMcpManager) {
-			try {
-				await withTimeout(
-					this.#disconnectOwnedMcpManager(),
-					3_000,
-					"Timed out disconnecting owned MCP manager during dispose",
-				);
-			} catch (error) {
-				logger.warn("Failed to disconnect owned MCP manager during dispose", { error: String(error) });
-			}
-		}
-		// Flush the retain queue BEFORE clearing the session's pointer so
-		// `HindsightRetainQueue.#doFlush` still sees `session.getHindsightSessionState() === state`.
-		// Reversed, the spliced batch survives just long enough to fail the
-		// identity check and get dropped with a `session vanished` warning.
-		const hindsightState = this.getHindsightSessionState();
-		await hindsightState?.flushRetainQueue();
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
-		const mnemopiState = setMnemopiSessionState(this, undefined);
-		await mnemopiState?.dispose({ timeoutMs: options.mnemopiConsolidateTimeoutMs });
-		// Tear down the embeddings subprocess AFTER mnemopi state.dispose:
-		// consolidate-on-dispose may still call `embed()` to store the final
-		// memories, and that round-trips through the worker we are about to
-		// hard-kill (issue #3031).
-		await shutdownMnemopiEmbedClient();
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
@@ -7101,6 +7185,18 @@ export class AgentSession {
 	 */
 	get hasPostPromptWork(): boolean {
 		return this.#postPromptTasks.size > 0;
+	}
+
+	/**
+	 * Test-only: register a promise as a post-prompt task so dispose's 5s drain
+	 * bound can be exercised without driving a full agent turn. Production code
+	 * must not call this.
+	 */
+	trackPostPromptTaskForTests(task: Promise<unknown>): void {
+		if (!isBunTestRuntime()) {
+			throw new Error("trackPostPromptTaskForTests is test-only");
+		}
+		this.#trackPostPromptTask(task);
 	}
 
 	/** All messages including custom types like BashExecutionMessage */

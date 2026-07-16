@@ -3639,7 +3639,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// for the pause while `session.dispose()` flushes memory consolidate and
 		// other cleanups (issue #3641). The await on the next line yields the
 		// event loop, giving requestRender() a tick to paint the status before
-		// dispose blocks.
+		// dispose blocks. If teardown runs longer than 3s (pending network flush),
+		// refresh the status so the wait stays visible without a new UI surface.
 		this.showStatus("Closing session…");
 
 		// Persist the draft and dispose the session through the shared teardown
@@ -3648,10 +3649,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		// first runs the work, the other awaits the same settled promise.
 		// The teardown is registered lazily in `init()` — a `/exit` reached
 		// before `init()` completed falls back to a direct dispose.
-		if (this.#signalTeardown) {
-			await this.#signalTeardown();
-		} else {
-			await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+		const stillClosingTimer = setTimeout(() => {
+			this.showStatus("Still closing… (flushing memory backend / network)");
+		}, 3_000);
+		try {
+			if (this.#signalTeardown) {
+				await this.#signalTeardown();
+			} else {
+				await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+			}
+		} finally {
+			clearTimeout(stillClosingTimer);
 		}
 
 		// Do not force a final render during teardown: disposed session/UI state can
