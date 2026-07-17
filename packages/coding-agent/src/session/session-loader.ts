@@ -240,6 +240,21 @@ function shouldResolveImagePayload(value: unknown, key: string | undefined): val
 	return (key === "content" && isImageBlock(value)) || key === "images";
 }
 
+function containsBlobRef(value: unknown): boolean {
+	if (typeof value === "string") return isBlobRef(value);
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			if (containsBlobRef(item)) return true;
+		}
+		return false;
+	}
+	if (typeof value !== "object" || value === null) return false;
+	for (const item of Object.values(value)) {
+		if (containsBlobRef(item)) return true;
+	}
+	return false;
+}
+
 async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, key?: string): Promise<void> {
 	if (shouldResolveImagePayload(value, key)) {
 		value.data = await resolveImageData(blobStore, value.data);
@@ -272,9 +287,12 @@ async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, ke
 }
 
 export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: BlobStore): Promise<void> {
-	await Promise.all(
-		entries.filter(entry => entry.type !== "session").map(entry => resolvePersistedBlobRefs(entry, blobStore)),
-	);
+	const sessionEntries = entries.filter(entry => entry.type !== "session");
+	const pending: Promise<void>[] = [];
+	for (const entry of sessionEntries) {
+		if (containsBlobRef(entry)) pending.push(resolvePersistedBlobRefs(entry, blobStore));
+	}
+	await Promise.all(pending);
 }
 
 /**
