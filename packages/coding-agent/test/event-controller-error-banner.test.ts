@@ -325,6 +325,16 @@ describe("EventController error banner", () => {
 		expect(chatChildren[0]).toBe(rebuilt);
 		expect(ctx.streamingComponent).toBe(rebuilt);
 		expect(ctx.streamingMessage).toBe(update);
+		// Historical rebuild finalizes the assistant; resume must re-open it so the
+		// live-region seam pins on the streaming block until message_end.
+		expect(rebuilt.isTranscriptBlockFinalized()).toBe(false);
+		expect(rebuilt.getTranscriptBlockSettledRows()).toBe(0);
+
+		await worker.emit({
+			type: "message_end",
+			message: update,
+		} as Extract<AgentSessionEvent, { type: "message_end" }>);
+		expect(rebuilt.isTranscriptBlockFinalized()).toBe(true);
 	});
 
 	it("clears retryable thinking-loop banners without restoring the dropped inline error", async () => {

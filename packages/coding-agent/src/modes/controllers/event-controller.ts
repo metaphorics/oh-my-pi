@@ -662,6 +662,9 @@ export class EventController {
 		const component = this.#lastAssistantComponent;
 		const persistenceKey = sessionMessagePersistenceKey(message);
 		if (!component || component.messagePersistenceKey() !== persistenceKey) return false;
+		// Historical rebuild constructs with a message, so the block is finalized.
+		// Re-open it as live before streaming so the transcript seam stays pinned.
+		component.markTranscriptBlockLive();
 		this.#lastVisibleBlockCount = 0;
 		this.#lastAssistantComponent = undefined;
 		this.ctx.streamingComponent = component;

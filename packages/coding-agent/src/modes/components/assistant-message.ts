@@ -478,6 +478,19 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/**
+	 * Re-open a rebuilt historical assistant as the live streaming target.
+	 * Historical construction finalizes the block (`message !== undefined`); a
+	 * mid-turn focus attach that reuses the same component must clear that
+	 * flag so {@link isTranscriptBlockFinalized} keeps the transcript live
+	 * region pinned here until {@link markTranscriptBlockFinalized} runs at
+	 * message_end. Does not unseal — seal remains a separate post-finalize
+	 * compaction signal.
+	 */
+	markTranscriptBlockLive(): void {
+		this.#transcriptBlockFinalized = false;
+	}
+
 	applyRetryRecovery(retryRecovery: AssistantMessage["retryRecovery"]): void {
 		if (!this.#lastMessage || !retryRecovery) return;
 		this.setErrorPinned(false);
