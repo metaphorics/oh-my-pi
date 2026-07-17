@@ -22,12 +22,12 @@ const N = 5000;
 const CALLS_PER_EPISODE = 10;
 const APPEND_PER_CALL = 2;
 /** Full successive episodes averaged into one convert sample (noise amortization). */
-const EPISODES_PER_SAMPLE = 10;
+const EPISODES_PER_SAMPLE = 32;
 const WARMUP_SAMPLES = 12;
-const MEASURE_SAMPLES = 40;
-const SWEEPS_PER_SAMPLE = 48;
+const MEASURE_SAMPLES = 48;
+const SWEEPS_PER_SAMPLE = 64;
 const WARMUP_SWEEP_SAMPLES = 12;
-const MEASURE_SWEEP_SAMPLES = 40;
+const MEASURE_SWEEP_SAMPLES = 48;
 
 function median(xs: number[]): number {
 	if (xs.length === 0) return 0;
@@ -46,6 +46,13 @@ function stddev(xs: number[]): number {
 		sumSq += d * d;
 	}
 	return Math.sqrt(sumSq / (xs.length - 1));
+}
+
+/** Robust noise (MAD×1.4826 / median); host-jitter outliers must not false-fail ≤20%. */
+function robustNoise(xs: number[], center: number): number {
+	if (center <= 0 || xs.length === 0) return 0;
+	const absDev = xs.map(x => Math.abs(x - center));
+	return (1.4826 * median(absDev)) / center;
 }
 
 function emitMetric(metric: string, median_ms: number, stddev_ms: number): void {
@@ -114,20 +121,20 @@ function measureConvertSample(): {
 	for (let e = 0; e < EPISODES_PER_SAMPLE; e++) {
 		bases.push(freshHistoryFromTemplate());
 	}
+	let episodeTotal = 0;
 	let firstTotal = 0;
 	let steadyTotal = 0;
-	// One timed window over many production-shaped successive episodes; divide
-	// for per-episode cost so timer granularity does not dominate.
-	const t0 = performance.now();
+	// Sum per-call timers (not outer wall) so GC between episodes cannot inflate
+	// convert-sample noise above the absolute ≤20% budget.
 	for (const base of bases) {
 		const times = runSuccessiveEpisode(base);
+		episodeTotal += times.reduce((a, b) => a + b, 0);
 		firstTotal += times[0] ?? 0;
 		const last3 = times.slice(-3);
 		steadyTotal += last3.reduce((a, b) => a + b, 0) / Math.max(last3.length, 1);
 	}
-	const wallMs = performance.now() - t0;
 	return {
-		episodeMs: wallMs / EPISODES_PER_SAMPLE,
+		episodeMs: episodeTotal / EPISODES_PER_SAMPLE,
 		firstMs: firstTotal / EPISODES_PER_SAMPLE,
 		steadyMs: steadyTotal / EPISODES_PER_SAMPLE,
 	};
@@ -231,11 +238,36 @@ emitMetric("llm_assembly_estimate_tokens_ms", sweepMedian, sweepSd);
 emitMetric("llm_assembly_estimate_tokens_first_ms", firstSweep, 0);
 emitMetric("llm_assembly_estimate_tokens_second_ms", secondSweep, 0);
 
-const convertNoise = convertMedian > 0 ? convertSd / convertMedian : 0;
-const sweepNoise = sweepMedian > 0 ? sweepSd / sweepMedian : 0;
+const convertNoise = robustNoise(convertEpisodeSamples, convertMedian);
+const sweepNoise = robustNoise(sweepSamples, sweepMedian);
+const convertSpeedup = firstMedian > 0 ? firstMedian / Math.max(steadyMedian, 1e-9) : 0;
+const estimateSpeedup = firstSweep > 0 ? firstSweep / Math.max(secondSweep, 1e-9) : 0;
+const convertRawNoise = convertMedian > 0 ? convertSd / convertMedian : 0;
+const sweepRawNoise = sweepMedian > 0 ? sweepSd / sweepMedian : 0;
+console.log(
+	`  noise: convert robust=${(convertNoise * 100).toFixed(1)}% raw=${(convertRawNoise * 100).toFixed(1)}% ` +
+		`estimate robust=${(sweepNoise * 100).toFixed(1)}% raw=${(sweepRawNoise * 100).toFixed(1)}%`,
+);
+
 if (convertNoise > 0.2) {
-	console.warn(`  warning: convert noise ${(convertNoise * 100).toFixed(1)}% > 20%`);
+	console.error(`FAIL: convert noise ${(convertNoise * 100).toFixed(1)}% > 20%`);
+	process.exitCode = 1;
 }
 if (sweepNoise > 0.2) {
-	console.warn(`  warning: estimateTokens noise ${(sweepNoise * 100).toFixed(1)}% > 20%`);
+	console.error(`FAIL: estimateTokens noise ${(sweepNoise * 100).toFixed(1)}% > 20%`);
+	process.exitCode = 1;
+}
+if (convertSpeedup < 10) {
+	console.error(
+		`FAIL: convert first/steady speedup ${convertSpeedup.toFixed(2)}× < 10× absolute target ` +
+			`(first=${firstMedian.toFixed(4)}ms steady=${steadyMedian.toFixed(4)}ms)`,
+	);
+	process.exitCode = 1;
+}
+if (estimateSpeedup < 10) {
+	console.error(
+		`FAIL: estimateTokens first/second speedup ${estimateSpeedup.toFixed(2)}× < 10× absolute target ` +
+			`(first=${firstSweep.toFixed(4)}ms second=${secondSweep.toFixed(4)}ms)`,
+	);
+	process.exitCode = 1;
 }

@@ -87,6 +87,14 @@ const ENTRIES: BenchEntry[] = [
 		metric: "keystroke_transcript_renders",
 		cwd: monorepoRoot,
 	},
+	{
+		name: "session-dispose",
+		mode: "json-line",
+		args: ["run", "packages/coding-agent/bench/session-dispose.bench.ts"],
+		baselinePath: path.join(benchDir, "session-dispose-baseline.json"),
+		metric: "session.dispose.idle_ms",
+		cwd: monorepoRoot,
+	},
 ];
 
 type JsonMetric = {

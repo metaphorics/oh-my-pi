@@ -19,10 +19,10 @@ import { buildSyntheticComponents } from "./fixtures/synthetic-transcript";
 
 const WIDTH = 100;
 const VIEWPORT_ROWS = 24;
-const WARMUP_EPISODES = 16;
-const MEASURE_EPISODES = 80;
+const WARMUP_EPISODES = 20;
+const MEASURE_EPISODES = 96;
 /** Pure renders per sample (mutate outside timer) to lift above timer noise floor. */
-const RENDERS_PER_SAMPLE = 256;
+const RENDERS_PER_SAMPLE = 384;
 
 function median(xs: number[]): number {
 	if (xs.length === 0) return 0;
@@ -47,6 +47,20 @@ function stddev(xs: number[]): number {
 	}
 	return Math.sqrt(sumSq / (xs.length - 1));
 }
+
+function p95(xs: number[]): number {
+	if (xs.length === 0) return 0;
+	const sorted = [...xs].sort((a, b) => a - b);
+	const idx = Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1);
+	return sorted[Math.max(0, idx)] ?? 0;
+}
+
+function robustNoise(xs: number[], center: number): number {
+	if (center <= 0 || xs.length === 0) return 0;
+	const absDev = xs.map(x => Math.abs(x - center));
+	return (1.4826 * median(absDev)) / center;
+}
+
 
 function makeTailMessage(text: string): AssistantMessage {
 	return {
@@ -128,30 +142,37 @@ await Settings.init({ inMemory: true });
 await initTheme("dark");
 
 const sizes = [500, 5000] as const;
-const results: Record<string, { median_ms: number; stddev_ms: number }> = {};
+const results: Record<
+	string,
+	{ median_ms: number; stddev_ms: number; p95_ms: number; samples: number[] }
+> = {};
 
 for (const n of sizes) {
 	const metric = n === 500 ? "transcript_compose_n500_ms" : "transcript_compose_n5000_ms";
 	console.log(`transcript-compose: measuring N=${n} (warmup=${WARMUP_EPISODES}, measure=${MEASURE_EPISODES})…`);
 	const r = measureCompose(n);
-	const noise = r.median_ms > 0 ? r.stddev_ms / r.median_ms : 0;
+	const rawNoise = r.median_ms > 0 ? r.stddev_ms / r.median_ms : 0;
+	const noise = robustNoise(r.samples, r.median_ms);
+	const p95_ms = p95(r.samples);
 	console.log(
-		`  N=${n}: median=${r.median_ms.toFixed(4)}ms stddev=${r.stddev_ms.toFixed(4)}ms ` +
-			`noise=${(noise * 100).toFixed(1)}%`,
+		`  N=${n}: median=${r.median_ms.toFixed(4)}ms p95=${p95_ms.toFixed(4)}ms stddev=${r.stddev_ms.toFixed(4)}ms ` +
+			`noise robust=${(noise * 100).toFixed(1)}% raw=${(rawNoise * 100).toFixed(1)}%`,
 	);
 	if (noise > 0.2) {
-		console.warn(
-			`  warning: stddev/median ${(noise * 100).toFixed(1)}% > 20% — consider widening MEASURE_EPISODES`,
+		console.error(
+			`FAIL: N=${n} noise ${(noise * 100).toFixed(1)}% > 20% — widen MEASURE_EPISODES or reduce machine load`,
 		);
+		process.exitCode = 1;
 	}
 	emitMetric(metric, r.median_ms, r.stddev_ms);
-	results[metric] = { median_ms: r.median_ms, stddev_ms: r.stddev_ms };
+	results[metric] = { median_ms: r.median_ms, stddev_ms: r.stddev_ms, p95_ms, samples: r.samples };
 }
 
 const n500 = results.transcript_compose_n500_ms?.median_ms ?? 0;
 const n5000 = results.transcript_compose_n5000_ms?.median_ms ?? 0;
+const n5000P95 = results.transcript_compose_n5000_ms?.p95_ms ?? 0;
 const ratio = n500 > 0 ? n5000 / n500 : 0;
-console.log(`ratio(N5000/N500)=${ratio.toFixed(3)} (baseline pre-seal; post WS-C target ≤1.3)`);
+console.log(`ratio(N5000/N500)=${ratio.toFixed(3)} (absolute target ≤1.3)`);
 console.log(`METRIC transcript_compose_ratio=${ratio.toFixed(4)}`);
 console.log(
 	JSON.stringify({
@@ -160,3 +181,20 @@ console.log(
 		stddev_ms: 0,
 	}),
 );
+console.log(`METRIC transcript_compose_n5000_p95_ms=${n5000P95.toFixed(4)}`);
+console.log(
+	JSON.stringify({
+		metric: "transcript_compose_n5000_p95_ms",
+		median_ms: n5000P95,
+		stddev_ms: 0,
+	}),
+);
+
+if (ratio > 1.3) {
+	console.error(`FAIL: compose ratio ${ratio.toFixed(3)} > 1.3 absolute target`);
+	process.exitCode = 1;
+}
+if (n5000P95 >= 10) {
+	console.error(`FAIL: N5000 p95 ${n5000P95.toFixed(4)}ms >= 10ms absolute target`);
+	process.exitCode = 1;
+}

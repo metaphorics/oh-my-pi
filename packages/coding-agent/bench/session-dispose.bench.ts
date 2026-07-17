@@ -17,8 +17,10 @@ import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const WARMUP = 4;
-const MEASURE = 24;
+const WARMUP = 10;
+const MEASURE = 48;
+/** Disposes averaged into each sample to lift above timer/GC noise floor. */
+const DISPOSES_PER_SAMPLE = 96;
 
 function median(xs: number[]): number {
 	if (xs.length === 0) return 0;
@@ -37,6 +39,12 @@ function stddev(xs: number[]): number {
 		sumSq += d * d;
 	}
 	return Math.sqrt(sumSq / (xs.length - 1));
+}
+
+function robustNoise(xs: number[], center: number): number {
+	if (center <= 0 || xs.length === 0) return 0;
+	const absDev = xs.map(x => Math.abs(x - center));
+	return (1.4826 * median(absDev)) / center;
 }
 
 function emitMetric(metric: string, median_ms: number, stddev_ms: number): void {
@@ -65,24 +73,39 @@ async function measureOnce(tempDir: TempDir, authStorage: AuthStorage): Promise<
 	return performance.now() - t0;
 }
 
+async function measureSample(tempDir: TempDir, authStorage: AuthStorage): Promise<number> {
+	let total = 0;
+	for (let i = 0; i < DISPOSES_PER_SAMPLE; i++) {
+		total += await measureOnce(tempDir, authStorage);
+	}
+	return total / DISPOSES_PER_SAMPLE;
+}
+
 async function main(): Promise<void> {
 	using tempDir = TempDir.createSync("@omp-dispose-bench-");
 	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 
 	for (let i = 0; i < WARMUP; i++) {
-		await measureOnce(tempDir, authStorage);
+		await measureSample(tempDir, authStorage);
 	}
 
 	const samples: number[] = [];
 	for (let i = 0; i < MEASURE; i++) {
-		samples.push(await measureOnce(tempDir, authStorage));
+		samples.push(await measureSample(tempDir, authStorage));
 	}
 
 	authStorage.close();
 	const med = median(samples);
 	const sd = stddev(samples);
+	const noise = robustNoise(samples, med);
+	const rawNoise = med > 0 ? sd / med : 0;
 	emitMetric("session.dispose.idle_ms", med, sd);
+	console.log(`  noise: robust=${(noise * 100).toFixed(1)}% raw=${(rawNoise * 100).toFixed(1)}%`);
+	if (noise > 0.2) {
+		console.error(`FAIL: dispose noise ${(noise * 100).toFixed(1)}% > 20%`);
+		process.exitCode = 1;
+	}
 	if (med >= 3_000) {
 		console.error(`FAIL: idle dispose median ${med.toFixed(2)}ms >= 3000ms status budget`);
 		process.exitCode = 1;

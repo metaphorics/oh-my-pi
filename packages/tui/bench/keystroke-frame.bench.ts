@@ -20,10 +20,10 @@ import { Editor, TUI } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../test/render-stress-scheduler";
 import { VirtualTerminal } from "../test/virtual-terminal";
 
-const WARMUP_EPISODES = 8;
-const MEASURE_EPISODES = 40;
+const WARMUP_EPISODES = 12;
+const MEASURE_EPISODES = 48;
 /** Independent one-key timings averaged into each episode sample. */
-const KEYS_PER_EPISODE = 2000;
+const KEYS_PER_EPISODE = 3000;
 const TRANSCRIPT_ROWS = 15_000;
 const COLS = 80;
 const ROWS = 24;
@@ -45,6 +45,12 @@ function stddev(xs: number[]): number {
 		sumSq += d * d;
 	}
 	return Math.sqrt(sumSq / (xs.length - 1));
+}
+
+function robustNoise(xs: number[], center: number): number {
+	if (center <= 0 || xs.length === 0) return 0;
+	const absDev = xs.map(x => Math.abs(x - center));
+	return (1.4826 * median(absDev)) / center;
 }
 
 /** Ref-stable leaf: returns the same array when unchanged; counts render() calls. */
@@ -187,7 +193,8 @@ tui.stop();
 
 const med = median(frameSamples);
 const sd = stddev(frameSamples);
-const noise = med > 0 ? sd / med : 0;
+const rawNoise = med > 0 ? sd / med : 0;
+const noise = robustNoise(frameSamples, med);
 // Quiet-frame contract: mean renders/key over ALL episodes (not median of rates —
 // a median can be 0 while intermittent recomposes still fire).
 const meanRendersPerKey =
@@ -196,7 +203,8 @@ const maxEpisodeRendersPerKey = renderSamples.reduce((a, b) => Math.max(a, b), 0
 
 console.log(
 	`keystroke-frame: median=${med.toFixed(4)}ms/key stddev=${sd.toFixed(4)}ms ` +
-		`noise=${(noise * 100).toFixed(1)}% episodes=${MEASURE_EPISODES} keys/episode=${KEYS_PER_EPISODE}`,
+		`noise robust=${(noise * 100).toFixed(1)}% raw=${(rawNoise * 100).toFixed(1)}% ` +
+		`episodes=${MEASURE_EPISODES} keys/episode=${KEYS_PER_EPISODE}`,
 );
 console.log(
 	`  transcript renders/keystroke: mean=${meanRendersPerKey.toFixed(4)} ` +
@@ -204,7 +212,19 @@ console.log(
 		`(post WS-B target mean=0 and max=0)`,
 );
 if (noise > 0.2) {
-	console.warn(`  warning: stddev/median ${(noise * 100).toFixed(1)}% > 20%`);
+	console.error(`FAIL: keystroke noise ${(noise * 100).toFixed(1)}% > 20%`);
+	process.exitCode = 1;
+}
+if (med >= 5) {
+	console.error(`FAIL: keystroke median ${med.toFixed(4)}ms >= 5ms absolute target`);
+	process.exitCode = 1;
+}
+if (meanRendersPerKey !== 0 || maxEpisodeRendersPerKey !== 0) {
+	console.error(
+		`FAIL: transcript renders/keystroke must be exactly 0 ` +
+			`(mean=${meanRendersPerKey.toFixed(4)} maxEpisode=${maxEpisodeRendersPerKey.toFixed(4)})`,
+	);
+	process.exitCode = 1;
 }
 
 emitMetric("keystroke_frame_ms", med, sd);
