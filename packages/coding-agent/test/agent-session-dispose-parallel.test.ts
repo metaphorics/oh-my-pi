@@ -19,7 +19,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import * as mnemopiEmbedClientModule from "@oh-my-pi/pi-coding-agent/mnemopi/embed-client";
-import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -261,18 +261,8 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 
 	it("clears owned AsyncJobManager singleton when dispose rejects", async () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const owned = {
-			dispose: async (_opts?: { timeoutMs?: number }) => {
-				throw new Error("owned async dispose boom");
-			},
-			// #cancelOwnAsyncJobs calls cancelAll on the scoped manager before dispose.
-			cancelAll: () => {},
-			getDeliveryState: () => ({
-				queued: 0,
-				delivering: false,
-				pendingJobIds: [] as string[],
-			}),
-		} as AsyncJobManager;
+		const owned = new AsyncJobManager({ onJobComplete: () => {} });
+		vi.spyOn(owned, "dispose").mockRejectedValue(new Error("owned async dispose boom"));
 		AsyncJobManager.setInstance(owned);
 
 		const s = await createSession({ ownedAsyncJobManager: owned });
@@ -298,12 +288,11 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 			.mockResolvedValue(undefined);
 
 		const order: string[] = [];
-		const rejectingState = {
-			dispose: async (_opts?: { timeoutMs?: number; consolidate?: boolean }) => {
-				order.push("mnemopi:dispose");
-				throw new Error("mnemopi dispose boom");
-			},
-		} as MnemopiSessionState;
+		const rejectingState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
+		vi.spyOn(rejectingState, "dispose").mockImplementation(async () => {
+			order.push("mnemopi:dispose");
+			throw new Error("mnemopi dispose boom");
+		});
 
 		const s = await createSession();
 		setMnemopiSessionState(s, rejectingState);
