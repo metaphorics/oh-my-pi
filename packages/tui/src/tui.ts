@@ -2821,11 +2821,11 @@ export class TUI extends Container {
 		// count too: both enter the geometry rebuild path below.
 		const replayFullHistory =
 			this.#hasEverRendered &&
-			!resizeRepaintsInPlace() &&
 			(this.#clearScrollbackOnNextRender ||
-				this.#resizeEventPending ||
-				(this.#previousWidth > 0 && this.#previousWidth !== width) ||
-				(this.#previousHeight > 0 && this.#previousHeight !== height));
+				(!resizeRepaintsInPlace() &&
+					(this.#resizeEventPending ||
+						(this.#previousWidth > 0 && this.#previousWidth !== width) ||
+						(this.#previousHeight > 0 && this.#previousHeight !== height))));
 		if (replayFullHistory) {
 			for (const child of this.children) prepareNativeScrollbackReplay(child);
 		}
