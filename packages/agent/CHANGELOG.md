@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reused settled per-message token estimates while bypassing mutable streaming assistants and invalidating rewritten messages.
+
 ## [17.0.0] - 2026-07-15
 
 ### Breaking Changes

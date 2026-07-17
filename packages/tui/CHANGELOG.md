@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Scoped quiet keystroke renders to the focused subtree instead of recomposing unrelated root components.
+- Added native-scrollback prefix virtualization so containers can compact committed history without losing or duplicating terminal rows.
+- Carried validated line widths through text, box, editor, and frame layout to avoid repeated Unicode width measurement.
+
 ## [17.0.1] - 2026-07-16
 
 ### Added

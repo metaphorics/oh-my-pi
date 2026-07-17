@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced long-session input latency by restricting quiet keystroke renders to the focused subtree while explicitly repainting sibling queue state.
+- Kept transcript composition cost flat as sessions grow by compacting sealed assistant blocks and safely rebasing native scrollback.
+- Reduced `/exit` latency by running independent disposal phases concurrently while preserving cleanup ordering.
+- Reused stable per-message LLM conversions and token estimates, with invalidation at session pruning, shaking, and image-removal boundaries.
+- Reduced concurrent subagent update CPU by reconstructing recent output only at progress emission boundaries.
+- Skipped blob-resolution traversal for session entries that contain no persisted blob references.
+
 ## [17.0.1] - 2026-07-16
 
 ### Changed
