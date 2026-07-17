@@ -12,17 +12,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import * as mnemopiEmbedClientModule from "@oh-my-pi/pi-coding-agent/mnemopi/embed-client";
-import {
-	type MnemopiSessionState,
-	setMnemopiSessionState,
-} from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -159,32 +156,28 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 		expect(hindsightStartAt).toBeLessThan(firstEnd);
 	});
 
-	it(
-		"bounds a never-settling post-prompt task at 5s and logs the exact warn",
-		async () => {
-			// Real platform clock: withTimeout is implemented with setTimeout, and
-			// awaiting dispose under fake timers leaves the deadline timer unfired
-			// while the hang task never settles. This is the intentional 5s hang-fix.
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-			const hang = deferred(); // intentionally never resolved
+	it("bounds a never-settling post-prompt task at 5s and logs the exact warn", async () => {
+		// Real platform clock: withTimeout is implemented with setTimeout, and
+		// awaiting dispose under fake timers leaves the deadline timer unfired
+		// while the hang task never settles. This is the intentional 5s hang-fix.
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const hang = deferred(); // intentionally never resolved
 
-			const s = await createSession();
-			s.trackPostPromptTaskForTests(hang.promise);
-			expect(s.hasPostPromptWork).toBe(true);
+		const s = await createSession();
+		s.trackPostPromptTaskForTests(hang.promise);
+		expect(s.hasPostPromptWork).toBe(true);
 
-			const started = performance.now();
-			await s.dispose();
-			session = undefined;
-			const elapsed = performance.now() - started;
+		const started = performance.now();
+		await s.dispose();
+		session = undefined;
+		const elapsed = performance.now() - started;
 
-			expect(elapsed).toBeGreaterThanOrEqual(4_500);
-			expect(elapsed).toBeLessThan(7_000);
-			expect(
-				warnSpy.mock.calls.some(call => call[0] === "Post-prompt tasks still draining at dispose deadline"),
-			).toBe(true);
-		},
-		15_000,
-	);
+		expect(elapsed).toBeGreaterThanOrEqual(4_500);
+		expect(elapsed).toBeLessThan(7_000);
+		expect(warnSpy.mock.calls.some(call => call[0] === "Post-prompt tasks still draining at dispose deadline")).toBe(
+			true,
+		);
+	}, 15_000);
 
 	it("writes async-job delivery entries before sessionManager.close", async () => {
 		const order: string[] = [];
@@ -199,13 +192,7 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 				await deliveryGate.promise;
 				const manager = session?.sessionManager;
 				if (!manager) throw new Error("session missing during delivery");
-				manager.appendCustomMessageEntry(
-					"async-result",
-					`delivery:${jobId}:${text}`,
-					true,
-					{ jobId },
-					"agent",
-				);
+				manager.appendCustomMessageEntry("async-result", `delivery:${jobId}:${text}`, true, { jobId }, "agent");
 				order.push("delivery-write");
 			},
 		});
@@ -297,9 +284,7 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 			warnSpy.mock.calls.some(
 				call =>
 					call[0] === "Session dispose subsystem failed during parallel teardown" &&
-					String((call[1] as { error?: unknown } | undefined)?.error ?? "").includes(
-						"owned async dispose boom",
-					),
+					String((call[1] as { error?: unknown } | undefined)?.error ?? "").includes("owned async dispose boom"),
 			),
 		).toBe(true);
 	});

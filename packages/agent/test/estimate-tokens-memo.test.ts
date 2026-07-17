@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
+	applyShakeRegion,
 	estimateTokens,
 	estimateTokensUncached,
 	invalidateTokenEstimate,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { applyShakeRegion } from "@oh-my-pi/pi-agent-core/compaction";
-import type { SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction";
 
 function assistantMessage(
 	content: AssistantMessage["content"],
@@ -103,7 +103,7 @@ describe("estimateTokens memo", () => {
 		};
 		const message = unsettledAssistant([toolCall]);
 		const first = estimateTokens(message);
-		toolCall.arguments = { command: "echo start && " + "x".repeat(400) };
+		toolCall.arguments = { command: `echo start && ${"x".repeat(400)}` };
 		const second = estimateTokens(message);
 		expect(second).toBeGreaterThan(first);
 		expect(second).toBe(estimateTokensUncached(message));

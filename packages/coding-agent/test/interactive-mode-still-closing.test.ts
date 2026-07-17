@@ -85,10 +85,7 @@ describe("InteractiveMode.shutdown still-closing status (WS-D)", () => {
 
 		vi.advanceTimersByTime(1);
 		await flushMicrotasks();
-		expect(statuses).toEqual([
-			"Closing session…",
-			"Still closing… (flushing memory backend / network)",
-		]);
+		expect(statuses).toEqual(["Closing session…", "Still closing… (flushing memory backend / network)"]);
 
 		teardownGate.resolve();
 		await shutdownPromise;

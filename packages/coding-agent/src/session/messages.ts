@@ -825,11 +825,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 
 	// Same array + epoch: exact repeat, or append-only growth with a fresh outer
 	// Message[] (slice) so callers holding the previous result keep a stable snapshot.
-	if (
-		messages === lastConvertSource &&
-		llmConversionEpoch === lastConvertEpoch &&
-		length >= lastConvertRefs.length
-	) {
+	if (messages === lastConvertSource && llmConversionEpoch === lastConvertEpoch && length >= lastConvertRefs.length) {
 		const prevLen = lastConvertRefs.length;
 		let prefixMatches = true;
 		for (let i = 0; i < prevLen; i++) {
@@ -873,8 +869,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 					counts.push(0);
 					continue;
 				}
-				const interruptedNext =
-					m.role === "assistant" ? followedByInterruptedThinking(messages, index) : false;
+				const interruptedNext = m.role === "assistant" ? followedByInterruptedThinking(messages, index) : false;
 				const converted = convertMessageCached(m, interruptedNext);
 				for (const entry of converted) out.push(entry);
 				refs.push(m);
@@ -898,8 +893,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 			counts[index] = 0;
 			continue;
 		}
-		const interruptedNext =
-			m.role === "assistant" ? followedByInterruptedThinking(messages, index) : false;
+		const interruptedNext = m.role === "assistant" ? followedByInterruptedThinking(messages, index) : false;
 		const converted = convertMessageCached(m, interruptedNext);
 		for (const entry of converted) out.push(entry);
 		counts[index] = converted.length;

@@ -363,11 +363,11 @@ import {
 	type CustomMessagePayload,
 	convertToLlm,
 	demoteInterruptedThinking,
-	invalidateLlmConversion,
 	type FileMentionMessage,
 	type HookMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
+	invalidateLlmConversion,
 	isEmptyErrorTurn,
 	isUserInterruptAbort,
 	normalizeCustomMessagePayload,
@@ -9950,7 +9950,6 @@ export class AgentSession {
 		const planMatcher = createPlanReadMatcher(() => this.#planReferencePath);
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
-
 
 	/** Drop convertToLlm memo entries for branch messages after in-place history rewrites. */
 	#invalidateLlmConversionsFromBranch(entries: SessionEntry[]): void {

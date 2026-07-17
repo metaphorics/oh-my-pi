@@ -458,7 +458,6 @@ describe("TUI keystroke-scoped render", () => {
 	});
 });
 
-
 describe("TUI.requestDirectWrite", () => {
 	it("directly rewrites a visible unchanged-size root segment without a full render", async () => {
 		const term = new VirtualTerminal(40, 8, 1_000);

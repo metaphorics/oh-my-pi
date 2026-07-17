@@ -374,10 +374,7 @@ const IMAGE_TOKEN_ESTIMATE = 1200;
 export type EstimateTokensOptions = { excludeEncryptedReasoning?: boolean };
 
 /** Uncached estimator body — exported so tests can assert memo parity. */
-export function estimateTokensUncached(
-	message: AgentMessage,
-	options?: EstimateTokensOptions,
-): number {
+export function estimateTokensUncached(message: AgentMessage, options?: EstimateTokensOptions): number {
 	const fragments: string[] = [];
 	let extra = 0;
 	if ((message as { role?: string }).role === "bashExecution") {
@@ -492,12 +489,7 @@ const tokenEstimateCacheExcludeEncrypted = new WeakMap<object, number>();
  */
 function isSettledAssistantMessage(message: AssistantMessage): boolean {
 	const stopReason = message.stopReason;
-	return (
-		message.usage != null &&
-		stopReason != null &&
-		stopReason !== "aborted" &&
-		stopReason !== "error"
-	);
+	return message.usage != null && stopReason != null && stopReason !== "aborted" && stopReason !== "error";
 }
 
 /**

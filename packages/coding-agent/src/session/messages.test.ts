@@ -167,9 +167,10 @@ describe("convertToLlm", () => {
 		const first = convertToLlm(withoutFollower);
 		const firstAssistant = first.find(entry => entry.role === "assistant");
 		expect(firstAssistant).toBeDefined();
-		expect(
-			Array.isArray(firstAssistant?.content) && firstAssistant.content.map(block => block.type),
-		).toEqual(["text", "thinking"]);
+		expect(Array.isArray(firstAssistant?.content) && firstAssistant.content.map(block => block.type)).toEqual([
+			"text",
+			"thinking",
+		]);
 
 		const withFollower: AgentMessage[] = [user, assistant, interruptedThinkingContinuity()];
 		const second = convertToLlm(withFollower);
@@ -185,9 +186,10 @@ describe("convertToLlm", () => {
 		const third = convertToLlm(withoutFollower);
 		const thirdAssistant = third.find(entry => entry.role === "assistant");
 		expect(thirdAssistant).not.toBe(secondAssistant);
-		expect(
-			Array.isArray(thirdAssistant?.content) && thirdAssistant.content.map(block => block.type),
-		).toEqual(["text", "thinking"]);
+		expect(Array.isArray(thirdAssistant?.content) && thirdAssistant.content.map(block => block.type)).toEqual([
+			"text",
+			"thinking",
+		]);
 	});
 
 	it("invalidates conversion cache when stripImagesFromMessage rewrites content in place", () => {
@@ -250,7 +252,6 @@ describe("convertToLlm", () => {
 				second[0].content[0].text,
 		).toBe("[Old tool result content cleared]");
 	});
-
 });
 
 describe("replaceLlmImagesWithText", () => {
