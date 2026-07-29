@@ -26,6 +26,7 @@ import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
+import type { KiroOptions } from "./providers/kiro";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -51,6 +52,7 @@ import {
 	streamCursor,
 	streamDevin,
 	streamGoogle,
+	streamKiro,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
 	streamOllama,
@@ -898,6 +900,9 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(model as Model<"devin-agent">, context, providerOptions as DevinOptions);
+
+		case "kiro-agent":
+			return streamKiro(model as Model<"kiro-agent">, context, providerOptions as KiroOptions);
 
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
@@ -1871,6 +1876,8 @@ function mapOptionsForApi<TApi extends Api>(
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
 		}
+		case "kiro-agent":
+			return castApi<"kiro-agent">(base);
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);
 	}

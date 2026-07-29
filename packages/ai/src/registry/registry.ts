@@ -25,6 +25,7 @@ import { groqProvider } from "./groq";
 import { huggingfaceProvider } from "./huggingface";
 import { kagiProvider } from "./kagi";
 import { kiloProvider } from "./kilo";
+import { kiroProvider } from "./kiro";
 import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
@@ -90,6 +91,7 @@ const ALL = [
 	githubCopilotProvider,
 	cursorProvider,
 	devinProvider,
+	kiroProvider,
 	googleAntigravityProvider,
 	googleGeminiCliProvider,
 	openaiCodexDeviceProvider,

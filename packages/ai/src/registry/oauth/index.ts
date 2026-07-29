@@ -150,13 +150,15 @@ export async function getOAuthApiKey(
 		provider === "github-copilot" ||
 		provider === "google-gemini-cli" ||
 		provider === "google-antigravity" ||
-		provider === "alibaba-coding-plan";
+		provider === "alibaba-coding-plan" ||
+		provider === "kiro";
 	const apiKey = needsStructuredApiKey
 		? JSON.stringify({
 				apiEndpoint: creds.apiEndpoint,
 				token: creds.access,
 				enterpriseUrl: creds.enterpriseUrl,
 				projectId: creds.projectId,
+				profileArn: creds.profileArn,
 				refreshToken: creds.refresh,
 				expiresAt: creds.expires,
 				email: creds.email,

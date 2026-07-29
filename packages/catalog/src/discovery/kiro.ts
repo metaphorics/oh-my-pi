@@ -32,11 +32,15 @@ export function parseKiroCredentials(apiKey: string | undefined, profileArn?: st
 	if (!token) return undefined;
 	try {
 		const parsed: unknown = JSON.parse(token);
-		if (isRecord(parsed) && typeof parsed.accessToken === "string") {
-			return {
-				accessToken: parsed.accessToken,
-				profileArn: typeof parsed.profileArn === "string" ? parsed.profileArn : profileArn,
-			};
+		if (isRecord(parsed)) {
+			const accessToken =
+				typeof parsed.token === "string" ? parsed.token : typeof parsed.accessToken === "string" ? parsed.accessToken : undefined;
+			if (accessToken) {
+				return {
+					accessToken,
+					profileArn: typeof parsed.profileArn === "string" ? parsed.profileArn : profileArn,
+				};
+			}
 		}
 	} catch {
 		// Raw API keys are not JSON.

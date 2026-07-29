@@ -35,6 +35,7 @@ import type { AnthropicOptions } from "./anthropic";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses";
 import type { CursorOptions } from "./cursor";
 import type { DevinOptions } from "./devin";
+import type { KiroOptions } from "./kiro";
 import type { GoogleOptions } from "./google";
 import type { GoogleGeminiCliOptions } from "./google-gemini-cli";
 import type { GoogleVertexOptions } from "./google-vertex";
@@ -135,6 +136,10 @@ interface DevinProviderModule {
 	streamDevin: (model: Model<"devin-agent">, context: Context, options: DevinOptions) => AssistantMessageEventStream;
 }
 
+interface KiroProviderModule {
+	streamKiro: (model: Model<"kiro-agent">, context: Context, options: KiroOptions) => AssistantMessageEventStream;
+}
+
 interface BedrockProviderModule {
 	streamBedrock: (
 		model: Model<"bedrock-converse-stream">,
@@ -159,6 +164,7 @@ let ollamaProviderModulePromise: Promise<LazyProviderModule<"ollama-chat">> | un
 let cursorProviderModulePromise: Promise<LazyProviderModule<"cursor-agent">> | undefined;
 let cursorProviderModuleOverride: LazyProviderModule<"cursor-agent"> | undefined;
 let devinProviderModulePromise: Promise<LazyProviderModule<"devin-agent">> | undefined;
+let kiroProviderModulePromise: Promise<LazyProviderModule<"kiro-agent">> | undefined;
 let bedrockProviderModuleOverride: LazyProviderModule<"bedrock-converse-stream"> | undefined;
 let bedrockProviderModulePromise: Promise<LazyProviderModule<"bedrock-converse-stream">> | undefined;
 
@@ -441,6 +447,14 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 	return devinProviderModulePromise;
 }
 
+function loadKiroProviderModule(): Promise<LazyProviderModule<"kiro-agent">> {
+	kiroProviderModulePromise ||= import("./kiro").then(module => {
+		const provider = module as KiroProviderModule;
+		return { stream: provider.streamKiro };
+	});
+	return kiroProviderModulePromise;
+}
+
 function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {
 	if (bedrockProviderModuleOverride) {
 		return Promise.resolve(bedrockProviderModuleOverride);
@@ -485,6 +499,7 @@ export const streamOpenAIResponses = createLazyStream(
 );
 export const streamCursor = createLazyStream(loadCursorProviderModule);
 export const streamDevin = createLazyStream(loadDevinProviderModule);
+export const streamKiro = createLazyStream(loadKiroProviderModule);
 export const streamOllama = createLazyStream(loadOllamaProviderModule, OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS);
 
 export const streamBedrock = createLazyStream(loadBedrockProviderModule);

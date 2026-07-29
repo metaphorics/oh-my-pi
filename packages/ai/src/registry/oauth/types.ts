@@ -19,6 +19,8 @@ export type OAuthCredentials = {
 	orgId?: string;
 	/** Human-readable organization name for display (may embed the email). */
 	orgName?: string;
+	/** Kiro CodeWhisperer profile ARN required by account-scoped runtime requests. */
+	profileArn?: string;
 	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.login`; token refreshes preserve it. Providers with an

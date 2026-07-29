@@ -5001,6 +5001,7 @@ export class AuthStorage {
 				projectId: result.newCredentials.projectId ?? selection.credential.projectId,
 				enterpriseUrl: result.newCredentials.enterpriseUrl ?? selection.credential.enterpriseUrl,
 				apiEndpoint: result.newCredentials.apiEndpoint ?? selection.credential.apiEndpoint,
+				profileArn: result.newCredentials.profileArn ?? selection.credential.profileArn,
 				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
 				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
 				authorizedAt: result.newCredentials.authorizedAt ?? selection.credential.authorizedAt,
@@ -5141,6 +5142,12 @@ export class AuthStorage {
 						token: oauthSelection.credential.access,
 						enterpriseUrl: oauthSelection.credential.enterpriseUrl,
 						apiEndpoint: oauthSelection.credential.apiEndpoint,
+					});
+				}
+				if (provider === "kiro") {
+					return JSON.stringify({
+						token: oauthSelection.credential.access,
+						profileArn: oauthSelection.credential.profileArn,
 					});
 				}
 				return oauthSelection.credential.access;
