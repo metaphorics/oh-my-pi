@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import http2 from "node:http2";
-import { streamKiro } from "@oh-my-pi/pi-ai/providers/kiro";
 import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
+import { streamKiro } from "@oh-my-pi/pi-ai/providers/kiro";
 import type { AssistantMessage, Context, Model, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -14,9 +14,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
  * through as a completed tool call.
  */
 
-type Scenario =
-	| { kind: "complete-tool-use" }
-	| { kind: "truncated-tool-use" };
+type Scenario = { kind: "complete-tool-use" } | { kind: "truncated-tool-use" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -172,9 +170,7 @@ describe("Kiro terminal-state invariant", () => {
 		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
 
 		expect(result.stopReason).toBe("toolUse");
-		const toolCall = result.content.find(
-			(block): block is ToolCall => block.type === "toolCall",
-		);
+		const toolCall = result.content.find((block): block is ToolCall => block.type === "toolCall");
 		expect(toolCall).toBeDefined();
 		if (toolCall) {
 			expect(toolCall.name).toBe("read_file");

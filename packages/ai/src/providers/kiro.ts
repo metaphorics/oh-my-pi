@@ -155,9 +155,14 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 			for await (const frame of decodeEventStream(body)) {
 				const messageType = frame.headers[":message-type"];
 				if (messageType === "exception" || messageType === "error") {
-					throw new AIError.ProviderHttpError(`Kiro stream error: ${TEXT_DECODER.decode(frame.payload)}`, 400, {
-						code: frame.headers[":exception-type"] ?? frame.headers[":error-code"],
-					});
+					const code = frame.headers[":exception-type"] ?? frame.headers[":error-code"];
+					throw new AIError.ProviderHttpError(
+						`Kiro stream error: ${TEXT_DECODER.decode(frame.payload)}`,
+						kiroStreamErrorStatus(code),
+						{
+							code,
+						},
+					);
 				}
 				if (messageType !== "event") continue;
 				const payload = parseEventPayload(frame.payload);
@@ -424,5 +429,17 @@ function parseEventPayload(payload: Uint8Array): Record<string, unknown> | undef
 		return isRecord(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+function kiroStreamErrorStatus(code: string | undefined): number {
+	switch (code?.toLowerCase()) {
+		case "internalserverexception":
+		case "serviceunavailableexception":
+			return 503;
+		case "throttlingexception":
+			return 429;
+		default:
+			return 400;
 	}
 }
