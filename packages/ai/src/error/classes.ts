@@ -142,6 +142,10 @@ export class AuthGatewayError extends ProviderHttpError {
 		this.name = "AuthGatewayError";
 	}
 }
+/** Cursor HTTP or Connect authentication failure eligible for credential rotation. */
+export class CursorCredentialError extends ProviderHttpError {
+	override readonly name = "CursorCredentialError";
+}
 
 export class CodexWebSocketTransportError extends Error {
 	constructor(detail: string) {

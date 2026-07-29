@@ -26,6 +26,7 @@ export * from "./providers/openai-responses";
 export * from "./providers/synthetic";
 export * from "./registry";
 export * from "./stream";
+export * from "./transport";
 export * from "./types";
 export * from "./usage";
 export * from "./usage/claude";

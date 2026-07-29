@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { create, toBinary } from "@bufbuild/protobuf";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -21,6 +22,7 @@ type Scenario =
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
+	| { kind: "http-status"; status: number }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-transport-error"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-hang" };
@@ -115,6 +117,12 @@ async function startServer(): Promise<string> {
 
 		if (headers[":path"] !== "/agent.v1.AgentService/Run") {
 			stream.respond({ ":status": 404 });
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "http-status") {
+			stream.respond({ ":status": scenario.status });
 			stream.end();
 			return;
 		}
@@ -290,6 +298,24 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("gRPC error 13: post-turn trailer failure");
+	});
+
+	it("preserves pre-message HTTP status and marks a 503 transient", async () => {
+		scenario = { kind: "http-status", status: 503 };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(result.errorStatus).toBe(503);
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBeTrue();
+	});
+
+	it("normalizes a pre-message 403 as a credential error", async () => {
+		scenario = { kind: "http-status", status: 403 };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(result.errorStatus).toBe(403);
+		expect(AIError.is(result.errorId, AIError.Flag.AuthFailed)).toBeTrue();
 	});
 
 	it("rejects when the stream ends before turnEnded", async () => {
