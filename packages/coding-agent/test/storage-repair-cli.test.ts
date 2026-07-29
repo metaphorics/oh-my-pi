@@ -31,6 +31,12 @@ interface FileFingerprint {
 
 type SessionFormat = "legacy-slotless" | "title-slot";
 
+interface SessionHeaderOverrides {
+	timestamp?: string;
+	cwd?: string;
+	parentSession?: string;
+}
+
 function requireValue<T>(value: T | undefined, label: string): T {
 	if (value === undefined) throw new Error(`Missing ${label}`);
 	return value;
@@ -139,6 +145,7 @@ async function writeSession(
 	name: string,
 	records: Record<string, unknown>[],
 	format: SessionFormat = "title-slot",
+	headerOverrides: SessionHeaderOverrides = {},
 ) {
 	const dir = path.join(getSessionsDir(root), project);
 	await fs.promises.mkdir(dir, { recursive: true });
@@ -149,6 +156,7 @@ async function writeSession(
 		id: name,
 		timestamp: "2026-01-01T00:00:00.000Z",
 		cwd: `/work/${project}`,
+		...headerOverrides,
 	};
 	const body = [
 		...(format === "title-slot" ? [serializeTitleSlot({ title: name, updatedAt: header.timestamp })] : []),
@@ -786,6 +794,90 @@ describe("offline SQLite salvage", () => {
 					.prepare("SELECT h.prompt FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?")
 					.get("third"),
 			).toEqual({ prompt: "third prompt" });
+		} finally {
+			db.close();
+		}
+	});
+
+	test("session rebuild orders cross-session prompts by finite inner message timestamps", async () => {
+		await createHistorySource();
+		await writeSession("queued-first", "queued-first", [
+			message("first", "2026-01-01T00:00:02.000Z", "first queued", { timestamp: 1_767_225_601_900 }),
+		]);
+		await writeSession("queued-second", "queued-second", [
+			message("second", "2026-01-01T00:00:01.000Z", "second queued", { timestamp: 1_767_225_602_100 }),
+		]);
+
+		const result = await runStorageRepair({ target: "history", historySource: "sessions", apply: true, agentDir: root });
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
+		try {
+			expect(db.prepare("SELECT prompt, created_at FROM history ORDER BY id").all()).toEqual([
+				{ prompt: "first queued", created_at: 1_767_225_601n },
+				{ prompt: "second queued", created_at: 1_767_225_602n },
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("fork copies keep the oldest session origin while retaining fork-only prompts", async () => {
+		await createHistorySource();
+		const origin = await writeSession(
+			"z-origin",
+			"origin",
+			[message("copied", "2026-01-01T00:00:01.000Z", "copied prompt")],
+			"title-slot",
+			{ timestamp: "2026-01-01T00:00:00.000Z" },
+		);
+		await writeSession(
+			"a-fork",
+			"fork",
+			[
+				message("copied", "2026-01-01T00:00:01.000Z", "copied prompt"),
+				message("fork-only", "2026-01-01T00:00:02.000Z", "fork-only prompt"),
+			],
+			"title-slot",
+			{ timestamp: "2026-01-01T00:00:10.000Z", parentSession: origin },
+		);
+
+		const result = await runStorageRepair({ target: "history", historySource: "sessions", apply: true, agentDir: root });
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
+		try {
+			expect(db.prepare("SELECT prompt, cwd, session_id FROM history ORDER BY id").all()).toEqual([
+				{ prompt: "copied prompt", cwd: "/work/z-origin", session_id: "origin" },
+				{ prompt: "fork-only prompt", cwd: "/work/a-fork", session_id: "fork" },
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("missing-parent fork families select a deterministic origin", async () => {
+		await createHistorySource();
+		await writeSession(
+			"z-later",
+			"later",
+			[message("copied", "2026-01-01T00:00:01.000Z", "orphan copied")],
+			"title-slot",
+			{ timestamp: "2026-01-01T00:00:10.000Z", parentSession: "missing-parent" },
+		);
+		await writeSession(
+			"a-earlier",
+			"earlier",
+			[message("copied", "2026-01-01T00:00:01.000Z", "orphan copied")],
+			"title-slot",
+			{ timestamp: "2026-01-01T00:00:00.000Z", parentSession: "missing-parent" },
+		);
+
+		const result = await runStorageRepair({ target: "history", historySource: "sessions", apply: true, agentDir: root });
+		expect(result.status).toBe("ready");
+		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
+		try {
+			expect(db.prepare("SELECT prompt, cwd, session_id FROM history ORDER BY id").all()).toEqual([
+				{ prompt: "orphan copied", cwd: "/work/a-earlier", session_id: "earlier" },
+			]);
 		} finally {
 			db.close();
 		}

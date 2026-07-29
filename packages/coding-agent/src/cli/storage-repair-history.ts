@@ -152,24 +152,32 @@ function validateHeader(record: Record<string, unknown>, file: string) {
 	assertInvariant(record.type === "session", `Missing session header in ${file}`);
 	assertInvariant(typeof record.id === "string" && record.id.length > 0, `Invalid session id in ${file}`);
 	assertInvariant(typeof record.cwd === "string" && record.cwd.length > 0, `Invalid session cwd in ${file}`);
-	parsedTimestamp(record.timestamp, `session header ${file}`);
+	const timestamp = parsedTimestamp(record.timestamp, `session header ${file}`);
+	const parentSession = record.parentSession;
+	assertInvariant(
+		parentSession === undefined || (typeof parentSession === "string" && parentSession.length > 0),
+		`Invalid parent session in ${file}`,
+	);
 	const version = record.version ?? 1;
 	assertInvariant(
 		typeof version === "number" && Number.isInteger(version) && version >= 1 && version <= CURRENT_SESSION_VERSION,
 		`Unsupported session version in ${file}`,
 	);
-	return { id: record.id, cwd: record.cwd };
+	return { id: record.id, cwd: record.cwd, timestamp, parentSession };
 }
 
 async function parseSession(file: SessionFileManifest, promptDb: Database) {
 	const input = fs.createReadStream(file.path, { encoding: "utf8" });
 	const lines = readline.createInterface({ input, crlfDelay: Infinity });
+	const insertSession = promptDb.prepare(
+		"INSERT INTO sessions(canonical_path, session_id, header_ms, parent_ref, family) VALUES (?, ?, ?, ?, ?)",
+	);
 	const insert = promptDb.prepare(
-		"INSERT INTO prompts(entry_ms, canonical_path, ordinal, prompt, cwd, session_id) VALUES (?, ?, ?, ?, ?, ?)",
+		"INSERT INTO prompts(entry_ms, canonical_path, ordinal, entry_id, prompt, cwd, session_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
 	);
 	let physicalLine = 0;
 	let recordOrdinal = 0;
-	let header: { id: string; cwd: string } | null = null;
+	let header: { id: string; cwd: string; timestamp: number; parentSession: string | undefined } | null = null;
 	let inserted = 0;
 	promptDb.exec("BEGIN");
 	try {
@@ -182,10 +190,18 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 			if (!record) continue;
 			if (!header) {
 				header = validateHeader(record, file.path);
+				insertSession.run(
+					file.canonicalPath,
+					header.id,
+					BigInt(header.timestamp),
+					header.parentSession ?? null,
+					file.canonicalPath,
+				);
 				continue;
 			}
 			recordOrdinal += 1;
-			const timestamp = parsedTimestamp(record.timestamp, `record ${physicalLine} in ${file.path}`);
+			assertInvariant(typeof record.id === "string" && record.id.length > 0, `Invalid record id in ${file.path}:${physicalLine}`);
+			const outerTimestamp = parsedTimestamp(record.timestamp, `record ${physicalLine} in ${file.path}`);
 			if (record.type !== "message") continue;
 			const message = record.message;
 			assertInvariant(
@@ -198,7 +214,9 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 			}
 			const prompt = promptContent(typed.content, `${file.path}:${physicalLine}`).trim();
 			if (prompt.length === 0) continue;
-			insert.run(BigInt(timestamp), file.canonicalPath, BigInt(recordOrdinal), prompt, header.cwd, header.id);
+			const innerTimestamp = typed.timestamp;
+			const timestamp = typeof innerTimestamp === "number" && Number.isFinite(innerTimestamp) ? Math.trunc(innerTimestamp) : outerTimestamp;
+			insert.run(BigInt(timestamp), file.canonicalPath, BigInt(recordOrdinal), record.id, prompt, header.cwd, header.id);
 			inserted += 1;
 		}
 		assertInvariant(physicalLine >= 1 && header, `Incomplete session file: ${file.path}`);
@@ -212,10 +230,49 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 		}
 		throw error;
 	} finally {
+		insertSession.finalize();
 		insert.finalize();
 		lines.close();
 		input.destroy();
 	}
+}
+
+function deriveSessionFamilies(db: Database) {
+	db.exec(`
+		WITH RECURSIVE
+			edges(source, target) AS (
+				SELECT child.canonical_path, parent.canonical_path
+				FROM sessions AS child
+				JOIN sessions AS parent
+					ON child.parent_ref = parent.session_id OR child.parent_ref = parent.canonical_path
+				UNION
+				SELECT child.canonical_path, 'missing:' || hex(child.parent_ref)
+				FROM sessions AS child
+				WHERE child.parent_ref IS NOT NULL
+					AND NOT EXISTS (
+						SELECT 1 FROM sessions AS parent
+						WHERE child.parent_ref = parent.session_id OR child.parent_ref = parent.canonical_path
+					)
+			),
+			nodes(node) AS (
+				SELECT canonical_path FROM sessions
+				UNION
+				SELECT source FROM edges
+				UNION
+				SELECT target FROM edges
+			),
+			reachable(start, node) AS (
+				SELECT node, node FROM nodes
+				UNION
+				SELECT reachable.start, edges.target
+				FROM reachable JOIN edges ON edges.source = reachable.node
+				UNION
+				SELECT reachable.start, edges.source
+				FROM reachable JOIN edges ON edges.target = reachable.node
+			)
+		UPDATE sessions
+		SET family = (SELECT MIN(start) FROM reachable WHERE node = sessions.canonical_path)
+	`);
 }
 
 export async function freezePromptManifest(
@@ -228,12 +285,13 @@ export async function freezePromptManifest(
 	const dbPath = path.join(tempDir, "prompts.sqlite");
 	const db = new Database(dbPath, { safeIntegers: true });
 	db.exec(
-		"CREATE TABLE prompts(entry_ms INTEGER NOT NULL, canonical_path TEXT NOT NULL, ordinal INTEGER NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL, session_id TEXT NOT NULL)",
+		"CREATE TABLE sessions(canonical_path TEXT PRIMARY KEY, session_id TEXT NOT NULL, header_ms INTEGER NOT NULL, parent_ref TEXT, family TEXT NOT NULL); CREATE TABLE prompts(entry_ms INTEGER NOT NULL, canonical_path TEXT NOT NULL REFERENCES sessions(canonical_path), ordinal INTEGER NOT NULL, entry_id TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL, session_id TEXT NOT NULL); CREATE INDEX prompts_family_entry_idx ON prompts(canonical_path, entry_id, entry_ms, prompt); CREATE INDEX sessions_parent_ref_idx ON sessions(parent_ref); CREATE INDEX sessions_id_idx ON sessions(session_id)",
 	);
 	const fingerprint = stableJson(first);
 	let count = 0;
 	try {
 		for (const file of first) count += await parseSession(file, db);
+		deriveSessionFamilies(db);
 		await hook?.();
 		assertInvariant(
 			fingerprint === stableJson(await manifestSessions(root)),
@@ -257,7 +315,17 @@ export async function promptManifestStillMatches(manifest: PromptManifest | null
 function sortedPrompts(manifest: Database) {
 	return manifest
 		.prepare(
-			"SELECT entry_ms, canonical_path, ordinal, prompt, cwd, session_id FROM prompts ORDER BY entry_ms ASC, canonical_path ASC, ordinal ASC",
+			`SELECT entry_ms, canonical_path, ordinal, prompt, cwd, session_id
+			 FROM (
+				SELECT prompts.entry_ms, prompts.canonical_path, prompts.ordinal, prompts.prompt, prompts.cwd, prompts.session_id,
+					ROW_NUMBER() OVER (
+						PARTITION BY sessions.family, prompts.entry_id, prompts.entry_ms, prompts.prompt
+						ORDER BY sessions.header_ms ASC, prompts.canonical_path ASC, prompts.ordinal ASC
+					) AS fork_rank
+				FROM prompts JOIN sessions ON sessions.canonical_path = prompts.canonical_path
+			 )
+			 WHERE fork_rank = 1
+			 ORDER BY entry_ms ASC, canonical_path ASC, ordinal ASC`,
 		)
 		.iterate() as Iterable<PromptRow>;
 }
