@@ -14,7 +14,11 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
  * through as a completed tool call.
  */
 
-type Scenario = { kind: "complete-tool-use" } | { kind: "truncated-tool-use" };
+type Scenario =
+	| { kind: "complete-tool-use" }
+	| { kind: "truncated-tool-use" }
+	| { kind: "truncated-text" }
+	| { kind: "truncated-reasoning" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -96,9 +100,15 @@ async function startServer(): Promise<string> {
 			stream.end();
 			return;
 		}
-		// truncated-tool-use: a toolUseEvent, then the stream closes with no
-		// metadataEvent — the defect window.
-		stream.write(toolUseStartFrame());
+		const partialFrame =
+			scenario.kind === "truncated-tool-use"
+				? toolUseStartFrame()
+				: scenario.kind === "truncated-text"
+					? encodeKiroEvent("assistantResponseEvent", { content: "partial answer" })
+					: encodeKiroEvent("reasoningContentEvent", { text: "partial thought" });
+		// A content event followed by EOF without metadataEvent is incomplete,
+		// regardless of whether it starts a tool call, text, or reasoning block.
+		stream.write(partialFrame);
 		stream.end();
 	});
 	const listening = Promise.withResolvers<void>();
@@ -176,8 +186,7 @@ describe("Kiro terminal-state invariant", () => {
 			expect(toolCall.name).toBe("read_file");
 			expect(toolCall.arguments).toMatchObject({ path: "/etc/passwd" });
 		}
-		expect(eventTypes).toContain("done");
-		expect(eventTypes[eventTypes.length - 1]).toBe("done");
+		expect(eventTypes).toEqual(["start", "toolcall_start", "toolcall_delta", "toolcall_end", "done"]);
 	});
 
 	it("rejects a truncated tool use that closes without END_TURN metadata", async () => {
@@ -192,6 +201,26 @@ describe("Kiro terminal-state invariant", () => {
 		expect(result.stopReason).not.toBe("toolUse");
 		expect(result.errorMessage).toContain("without END_TURN");
 		expect(eventTypes[eventTypes.length - 1]).toBe("error");
+		expect(eventTypes).not.toContain("thinking_end");
+		expect(eventTypes).not.toContain("text_end");
+		expect(eventTypes).not.toContain("toolcall_end");
 		expect(eventTypes).not.toContain("done");
+	});
+
+	it("rejects truncated text and reasoning before their terminal events", async () => {
+		for (const kind of ["truncated-text", "truncated-reasoning"] as const) {
+			scenario = { kind };
+			const baseUrl = await startServer();
+			const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("without END_TURN");
+			expect(eventTypes[eventTypes.length - 1]).toBe("error");
+			expect(eventTypes).not.toContain("thinking_end");
+			expect(eventTypes).not.toContain("text_end");
+			expect(eventTypes).not.toContain("toolcall_end");
+			expect(eventTypes).not.toContain("done");
+			await stopServer();
+		}
 	});
 });

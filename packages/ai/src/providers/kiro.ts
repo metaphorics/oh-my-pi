@@ -253,6 +253,12 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 				}
 			}
 			if (options?.signal?.aborted) throw new AIError.AbortError();
+			if (!sawEndTurn) {
+				throw new AIError.ProviderResponseError("Kiro ended the response without END_TURN", {
+					provider: model.provider,
+					kind: "incomplete-stream",
+				});
+			}
 			if (thinkingBlock) {
 				stream.push({
 					type: "thinking_end",
@@ -276,12 +282,6 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 					contentIndex: output.content.indexOf(block),
 					toolCall: block,
 					partial: output,
-				});
-			}
-			if (!sawEndTurn) {
-				throw new AIError.ProviderResponseError("Kiro ended the response without END_TURN", {
-					provider: model.provider,
-					kind: "incomplete-stream",
 				});
 			}
 			output.stopReason = toolBlocks.size > 0 ? "toolUse" : "stop";
