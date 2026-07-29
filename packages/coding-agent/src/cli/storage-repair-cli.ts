@@ -107,7 +107,7 @@ export async function runStorageRepair(
 		candidatePathTrusted: false,
 		checksums: [],
 		objects: [],
-		manualNextStep: manualNextStep(source, planned.candidate, planned.backup),
+		manualNextStep: "",
 	};
 	let snapshot: PristineSnapshot | null = null;
 	let prompts: PromptManifest | null = null;
@@ -120,7 +120,6 @@ export async function runStorageRepair(
 		const artifacts = await resolveArtifactPaths(source, flags.output);
 		result.backup = artifacts.backup;
 		result.candidate = artifacts.candidate;
-		result.manualNextStep = manualNextStep(source, artifacts.candidate, artifacts.backup);
 		snapshot = await preparePristineSnapshot(source, flags.target === "agent", hooks.afterPristineCopy);
 
 		let diagnosis: AgentRepairDiagnosis | null = null;
@@ -253,6 +252,7 @@ export async function runStorageRepair(
 			}
 		}
 	}
+	result.manualNextStep = manualNextStep(result);
 	if (result.status === "refused") result.objects.push(refusedObject(result));
 	return result;
 }

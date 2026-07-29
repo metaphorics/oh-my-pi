@@ -11,6 +11,7 @@ import type {
 	SourceMemberManifest,
 	SourceTripletManifest,
 	StorageRepairChecksum,
+	StorageRepairResult,
 } from "./storage-repair-types";
 
 const COPY_BUFFER_BYTES = 1024 * 1024;
@@ -754,13 +755,25 @@ export async function publishCandidate(
 	await publishNoReplace(stage, finalPath, seal, onLinked, hooks);
 }
 
-export function manualNextStep(source: string, candidate: string, backup: string): string {
+export function manualNextStep(result: StorageRepairResult): string {
+	if (result.status === "refused") {
+		return "Repair was refused. Do not alter live storage or install the candidate.";
+	}
+	if (!result.apply && result.status === "ready") {
+		return "Candidate is ready for publication. Rerun the same repair with --apply; do not alter live storage or install the candidate yet.";
+	}
+	if (result.status === "published-with-warning" || !result.candidatePathTrusted) {
+		return `Do not install the candidate or alter live storage. Retain the candidate, backup tar ${result.backup}, and quarantine artifacts for diagnosis.`;
+	}
+	if (!(result.apply && result.status === "ready" && result.candidatePublished)) {
+		return "Candidate is not ready for installation. Do not alter live storage or install the candidate.";
+	}
 	return [
 		"Stop every OMP process.",
-		`Move ${source}, ${source}-wal, and ${source}-shm together into a retained quarantine directory.`,
+		`Move ${result.source}, ${result.source}-wal, and ${result.source}-shm together into a retained quarantine directory.`,
 		"Verify no old sidecar remains at the live basename.",
-		`Copy ${candidate} to an exclusively created mode-0600 sibling staging file, verify its checksum, fsync it, atomically no-replace-rename it to the now-vacant live main path, and sync the parent directory.`,
-		`If manually restoring ${backup}, extract every source member and apply its manifest.json recorded uid, gid, and mode; if ownership cannot be restored, use mode 0600 for that member instead.`,
-		`Keep the candidate, backup tar ${backup}, and quarantine until a normal reopen succeeds; the tar manifest documents byte-exact source restoration if needed. Never stream-copy directly into the live basename.`,
+		`Copy ${result.candidate} to an exclusively created mode-0600 sibling staging file, verify its checksum, fsync it, atomically no-replace-rename it to the now-vacant live main path, and sync the parent directory.`,
+		`If manually restoring ${result.backup}, extract every source member and apply its manifest.json recorded uid, gid, and mode; if ownership cannot be restored, use mode 0600 for that member instead.`,
+		`Keep the candidate, backup tar ${result.backup}, and quarantine until a normal reopen succeeds; the tar manifest documents byte-exact source restoration if needed. Never stream-copy directly into the live basename.`,
 	].join(" ");
 }

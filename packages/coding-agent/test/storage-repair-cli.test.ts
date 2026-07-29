@@ -481,6 +481,55 @@ describe("offline SQLite salvage", () => {
 		expect(result.candidatePathTrusted).toBe(false);
 	});
 
+	test("dry-run guidance requires an apply rerun", async () => {
+		await createAgentSource();
+		const result = await runStorageRepair({ target: "agent", apply: false, agentDir: root });
+		expect(result.status).toBe("ready");
+		expect(result.manualNextStep).toBe(
+			"Candidate is ready for publication. Rerun the same repair with --apply; do not alter live storage or install the candidate yet.",
+		);
+	});
+
+	test("refusal guidance forbids installation", async () => {
+		await createAgentSource();
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root },
+			{ beforeBackupWrite: () => { throw new Error("backup refusal"); } },
+		);
+		expect(result.status).toBe("refused");
+		expect(result.manualNextStep).toBe("Repair was refused. Do not alter live storage or install the candidate.");
+	});
+
+	test("published warning guidance retains artifacts for diagnosis", async () => {
+		const dbPath = await createAgentSource();
+		const result = await runStorageRepair(
+			{ target: "agent", apply: true, agentDir: root },
+			{ afterCandidatePublication: () => fs.promises.appendFile(dbPath, "late source change") },
+		);
+		expect(result.status).toBe("published-with-warning");
+		expect(result.manualNextStep).toBe(
+			`Do not install the candidate or alter live storage. Retain the candidate, backup tar ${result.backup}, and quarantine artifacts for diagnosis.`,
+		);
+	});
+
+	test("trusted apply guidance preserves the quarantine installation procedure", async () => {
+		await createAgentSource();
+		const result = await runStorageRepair({ target: "agent", apply: true, agentDir: root });
+		expect(result.status).toBe("ready");
+		expect(result.candidatePublished).toBe(true);
+		expect(result.candidatePathTrusted).toBe(true);
+		expect(result.manualNextStep).toBe(
+			[
+				"Stop every OMP process.",
+				`Move ${result.source}, ${result.source}-wal, and ${result.source}-shm together into a retained quarantine directory.`,
+				"Verify no old sidecar remains at the live basename.",
+				`Copy ${result.candidate} to an exclusively created mode-0600 sibling staging file, verify its checksum, fsync it, atomically no-replace-rename it to the now-vacant live main path, and sync the parent directory.`,
+				`If manually restoring ${result.backup}, extract every source member and apply its manifest.json recorded uid, gid, and mode; if ownership cannot be restored, use mode 0600 for that member instead.`,
+				`Keep the candidate, backup tar ${result.backup}, and quarantine until a normal reopen succeeds; the tar manifest documents byte-exact source restoration if needed. Never stream-copy directly into the live basename.`,
+			].join(" "),
+		);
+	});
+
 	test("apply publishes verified raw tar first and a mode-0600 exact candidate", async () => {
 		const dbPath = await createAgentSource();
 		const sourceDigest = new Bun.SHA256().update(await Bun.file(dbPath).bytes()).digest("hex");
@@ -1536,8 +1585,10 @@ describe("offline SQLite salvage", () => {
 		let result = await runGcCommand({
 			flags: { agentDir: root, repairStorage: "history", historySource: "fresh", apply: true },
 		});
-		expect(result.repair?.manualNextStep).toContain("quarantine");
+		const trustedRepair = requireValue(result.repair, "trusted repair result");
+		expect(trustedRepair.manualNextStep).toContain("quarantine");
 		expect(stdout.join("")).toContain("manual next step:");
+		expect(stdout.join("")).toContain(trustedRepair.manualNextStep);
 		expect(stdout.join("")).toContain("data loss: true");
 		expect(stdout.join("")).toContain("candidate: ");
 		expect(stdout.join("")).toContain("(published)");
@@ -1551,7 +1602,10 @@ describe("offline SQLite salvage", () => {
 		expect(parsed.repair.dataLoss).toBe(true);
 		expect(parsed.repair.candidatePublished).toBe(false);
 		expect(parsed.repair.candidatePathTrusted).toBe(false);
-		expect(parsed.repair.manualNextStep).toContain("quarantine");
+		expect(parsed.repair.manualNextStep).toBe(
+			"Candidate is ready for publication. Rerun the same repair with --apply; do not alter live storage or install the candidate yet.",
+		);
+		expect(stdout.join("")).toContain(parsed.repair.manualNextStep);
 		expect(
 			collectGcErrors({
 				agentDir: root,
