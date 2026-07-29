@@ -1083,9 +1083,15 @@ function reconcileBedrockThinkingBudget(
 		thinking.budget_tokens = clampedBudget;
 		return additionalModelRequestFields;
 	}
-	// Too little headroom for a viable thinking budget — drop thinking entirely.
+	// Too little headroom for a viable thinking budget — drop thinking entirely,
+	// along with the interleaved-thinking beta that is meaningless without it.
 	const next = { ...additionalModelRequestFields };
 	delete next.thinking;
+	if (Array.isArray(next.anthropic_beta)) {
+		const betas = next.anthropic_beta.filter(beta => beta !== "interleaved-thinking-2025-05-14");
+		if (betas.length > 0) next.anthropic_beta = betas;
+		else delete next.anthropic_beta;
+	}
 	return Object.keys(next).length > 0 ? next : undefined;
 }
 

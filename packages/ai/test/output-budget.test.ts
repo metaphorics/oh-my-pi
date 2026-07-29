@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { clampMaxTokensToContext, estimatePromptTokens } from "@oh-my-pi/pi-ai/utils/output-budget";
@@ -290,5 +291,76 @@ describe("anthropic output-budget clamp integration", () => {
 		const payload = await capturePayload(model, context, 8192, { enabled: true, budgetTokens: 4000 });
 		expect(payload.max_tokens).toBe(1);
 		expect(payload.thinking).toBeUndefined();
+	});
+});
+
+// ─── Bedrock request-building integration ────────────────────────────────────
+
+function makeBedrockModel(contextWindow: number, maxTokens: number): Model<"bedrock-converse-stream"> {
+	return buildModel({
+		id: "anthropic.claude-sonnet-4-5",
+		name: "Claude Sonnet 4.5 (Bedrock)",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow,
+		maxTokens,
+	});
+}
+
+function captureBedrockPayload(
+	model: Model<"bedrock-converse-stream">,
+	context: Context,
+	options: { maxTokens?: number; reasoning?: "medium"; interleavedThinking?: boolean },
+): Promise<Record<string, unknown>> {
+	const { promise, resolve } = Promise.withResolvers<Record<string, unknown>>();
+	// The stream is only observed for its onPayload snapshot and then abandoned.
+	// A bearer token keeps the abandoned continuation off the AWS-credentials
+	// path (see bedrock-prompt-cache.test.ts for the unhandled-rejection trap).
+	void streamBedrock(model, context, {
+		apiKey: "test-key",
+		signal: createAbortedSignal(),
+		...options,
+		onPayload: payload => resolve(payload as Record<string, unknown>),
+	});
+	return promise;
+}
+
+describe("bedrock output-budget clamp integration", () => {
+	it("reconciles the thinking budget under the clamped maxTokens", async () => {
+		// contextWindow=16000, prompt≈6000 tokens, requested=8192, effort medium (budget 8192).
+		// clamp: min(8192, max(1, 16000 - 6000 - 4096)) = 5904.
+		// reconcile: 8192 + 4000 > 5904 → budget = 5904 - 4000 = 1904 (≥ 1024 floor).
+		const model = makeBedrockModel(16_000, 8_192);
+		const bigText = "x".repeat(24_000);
+		const context: Context = {
+			messages: [{ role: "user", content: bigText, timestamp: Date.now() }],
+		};
+		const payload = await captureBedrockPayload(model, context, { maxTokens: 8192, reasoning: "medium" });
+		expect(payload.inferenceConfig).toMatchObject({ maxTokens: 5904 });
+		expect(payload.additionalModelRequestFields).toMatchObject({
+			thinking: { type: "enabled", budget_tokens: 1904 },
+		});
+	});
+
+	it("drops thinking and the interleaved beta when the window is too tight", async () => {
+		// contextWindow=10000, prompt≈6000 tokens → clamp to 1.
+		// reconcile: 1 - 4000 < 1024 → thinking dropped; the interleaved beta must
+		// not survive without it, leaving no additional fields at all.
+		const model = makeBedrockModel(10_000, 8_192);
+		const bigText = "x".repeat(24_000);
+		const context: Context = {
+			messages: [{ role: "user", content: bigText, timestamp: Date.now() }],
+		};
+		const payload = await captureBedrockPayload(model, context, {
+			maxTokens: 8192,
+			reasoning: "medium",
+			interleavedThinking: true,
+		});
+		expect(payload.inferenceConfig).toMatchObject({ maxTokens: 1 });
+		expect(payload.additionalModelRequestFields).toBeUndefined();
 	});
 });
