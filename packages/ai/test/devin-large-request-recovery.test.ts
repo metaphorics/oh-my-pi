@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { create, toBinary } from "@bufbuild/protobuf";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 
 const CONNECT_END_STREAM_FLAG = 0x02;
 const LARGE_TOOL_RESULT_BYTES = 160 * 1024;
@@ -59,10 +59,8 @@ function connectErrorFrame(code: string, message: string): Uint8Array {
 }
 
 async function runTrailerError(context: Context, code: string, message: string, leadingFrames: Uint8Array[] = []) {
-	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 	const trailer = connectErrorFrame(code, message);
-	const fetchImpl = (async (input: string | URL | Request) => {
-		if (String(input).includes("GetUserJwt")) return new Response(authPayload);
+	const fetchImpl: FetchImpl = async () => {
 		return new Response(
 			new ReadableStream<Uint8Array>({
 				start(controller) {
@@ -73,7 +71,7 @@ async function runTrailerError(context: Context, code: string, message: string, 
 			}),
 			{ status: 200 },
 		);
-	}) as typeof fetch;
+	};
 
 	return streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
 }

@@ -1,15 +1,11 @@
 import type { ClientHttp2Stream, IncomingHttpHeaders } from "node:http2";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gzipSync } from "node:zlib";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
 	ChatMessageRequestType,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
 } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import {
-	GetUserJwtRequestSchema,
-	GetUserJwtResponseSchema,
-} from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 import {
 	CacheControlType,
 	type ChatMessagePrompt,
@@ -61,7 +57,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
 import { transformMessages } from "./transform-messages";
 
-/** Base host for Codeium/Windsurf's Cascade chat API. */
+/** Base host for the current Devin CLI's Codeium Connect RPCs. */
 export const DEVIN_API_URL = "https://server.codeium.com";
 
 export interface DevinOptions extends StreamOptions {
@@ -74,11 +70,16 @@ export interface DevinOptions extends StreamOptions {
 }
 
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
-const DEVIN_IDE_VERSION = "3.2.23";
-const DEVIN_EXTENSION_VERSION = "1.48.2";
+const DEVIN_IDE_VERSION = "0.0.0-dev";
+const DEVIN_EXTENSION_VERSION = "0.0.0-dev";
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
-const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
-const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
+const DEVIN_DEFAULT_STOP_PATTERNS = [
+	"<|user|>",
+	"<|bot|>",
+	"<|context_request|>",
+	"<\u007cendoftext\u007c>",
+	"<|end_of_turn|>",
+];
 
 /**
  * Recovery heuristic for opaque Devin `invalid_argument` trailers. This is not
@@ -185,9 +186,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const fetchImpl = options?.fetch ?? fetch;
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
 			const apiKey = normalizeDevinSessionToken(options?.apiKey);
-			const auth = await fetchDevinAuthMetadata(apiKey, baseUrl, fetchImpl, signal);
-			const chatBaseUrl = auth.baseUrl ?? baseUrl;
-			const request = buildDevinChatRequest(model, context, options, apiKey, auth.userJwt);
+			const request = buildDevinChatRequest(model, context, options, apiKey);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
@@ -202,7 +201,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				"connect-protocol-version": "1",
 				"connect-content-encoding": "gzip",
 				"accept-encoding": "identity",
-				"user-agent": "connect-go/1.18.1 (go1.26.3)",
+				authorization: `Basic ${apiKey}`,
 				"connect-accept-encoding": "gzip",
 				...(options?.headers ?? {}),
 			};
@@ -210,7 +209,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			let body: AsyncIterable<Uint8Array>;
 			if (options?.fetch) {
 				body = await fetchDevinChatBody({
-					url: chatBaseUrl + CHAT_MESSAGE_PATH,
+					url: baseUrl + CHAT_MESSAGE_PATH,
 					headers: commonHeaders,
 					frame,
 					fetchImpl,
@@ -219,7 +218,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				});
 			} else {
 				try {
-					h2Lease = await acquireH2Session(chatBaseUrl, model.provider, signal);
+					h2Lease = await acquireH2Session(baseUrl, model.provider, signal);
 					h2Request = await h2Lease.request(
 						{
 							":method": "POST",
@@ -258,7 +257,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					if (error instanceof AIError.DevinApiError || !isTransientTransportError(error)) throw error;
 					logger.warn("devin: HTTP/2 unavailable, falling back to HTTP/1", { error: String(error) });
 					body = await fetchDevinChatBody({
-						url: chatBaseUrl + CHAT_MESSAGE_PATH,
+						url: baseUrl + CHAT_MESSAGE_PATH,
 						headers: commonHeaders,
 						frame,
 						fetchImpl,
@@ -528,58 +527,6 @@ async function fetchDevinChatBody(options: {
 	return response.body;
 }
 
-async function fetchDevinAuthMetadata(
-	apiKey: string,
-	baseUrl: string,
-	fetchImpl: NonNullable<StreamOptions["fetch"]>,
-	signal: AbortSignal | undefined,
-): Promise<{ userJwt: string; baseUrl?: string }> {
-	const request = create(GetUserJwtRequestSchema, {
-		metadata: create(MetadataSchema, {
-			apiKey,
-			ideName: "windsurf",
-			ideVersion: DEVIN_IDE_VERSION,
-			extensionName: "windsurf",
-			extensionVersion: DEVIN_EXTENSION_VERSION,
-			locale: "en",
-		}),
-	});
-	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
-		method: "POST",
-		headers: {
-			"content-type": "application/proto",
-			"connect-protocol-version": "1",
-			accept: "*/*",
-		},
-		body: toBinary(GetUserJwtRequestSchema, request),
-		signal,
-	});
-	const payload = new Uint8Array(await response.arrayBuffer());
-	if (!response.ok) {
-		throw new AIError.DevinApiError(
-			`Devin auth error ${response.status} ${response.statusText}: ${new TextDecoder().decode(payload)}`,
-			response.status,
-		);
-	}
-	const decoded = decodeDevinUserJwtResponse(payload);
-	if (!decoded.userJwt) {
-		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
-			provider: "devin",
-			kind: "runtime",
-		});
-	}
-	const customBaseUrl = decoded.customApiServerUrl.trim();
-	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
-}
-
-function decodeDevinUserJwtResponse(payload: Uint8Array) {
-	try {
-		return fromBinary(GetUserJwtResponseSchema, payload);
-	} catch {
-		return fromBinary(GetUserJwtResponseSchema, gunzipSync(payload));
-	}
-}
-
 /**
  * Build a {@link GetChatMessageRequest} for one Cascade turn. Auth rides inside
  * `Metadata.apiKey`; the system prompt is the flattened `prompt` string and the
@@ -590,7 +537,6 @@ function buildDevinChatRequest(
 	context: Context,
 	options: DevinOptions | undefined,
 	apiKey: string,
-	userJwt: string,
 ) {
 	const cascadeId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 	const stopPatterns =
@@ -601,12 +547,12 @@ function buildDevinChatRequest(
 	return create(GetChatMessageRequestSchema, {
 		metadata: create(MetadataSchema, {
 			apiKey,
-			userJwt,
-			ideName: "windsurf",
+			ideName: "chisel",
 			ideVersion: DEVIN_IDE_VERSION,
-			extensionName: "windsurf",
+			extensionName: "chisel",
 			extensionVersion: DEVIN_EXTENSION_VERSION,
 			locale: "en",
+			os: process.platform,
 		}),
 		prompt: (context.systemPrompt ?? []).join("\n\n"),
 		chatMessagePrompts: buildChatMessagePrompts(messages, cascadeId, model),

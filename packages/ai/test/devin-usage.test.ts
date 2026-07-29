@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { create, toBinary } from "@bufbuild/protobuf";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 import {
 	ModelUsageStatsSchema,
 	StopReason,
@@ -36,7 +36,6 @@ const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 
 
 describe("streamDevin usage", () => {
 	it("includes cached tokens in totalTokens", async () => {
-		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 		const response = create(GetChatMessageResponseSchema, {
 			messageId: "msg-1",
 			stopReason: StopReason.STOP_PATTERN,
@@ -48,10 +47,7 @@ describe("streamDevin usage", () => {
 			}),
 		});
 		const responseFrame = frameConnectMessage(toBinary(GetChatMessageResponseSchema, response));
-		const fetchImpl = (async (input: string | URL | Request) => {
-			if (String(input).includes("GetUserJwt")) return new Response(authPayload);
-			return new Response(responseFrame);
-		}) as typeof fetch;
+		const fetchImpl: FetchImpl = async () => new Response(responseFrame);
 
 		const result = await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
 

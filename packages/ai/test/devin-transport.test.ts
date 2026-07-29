@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import * as http from "node:http";
 import * as http2 from "node:http2";
 import type { AddressInfo } from "node:net";
 import { create, toBinary } from "@bufbuild/protobuf";
@@ -9,16 +8,13 @@ import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 
 const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
-let authServer: http.Server;
 let h2Server: http2.Http2Server;
-let authBaseUrl = "";
 let h2BaseUrl = "";
 let respond: (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => Promise<void> | void;
 
-function listen(server: http.Server | http2.Http2Server): Promise<string> {
+function listen(server: http2.Http2Server): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	server.once("error", reject);
 	server.listen(0, "127.0.0.1", () => {
@@ -28,7 +24,7 @@ function listen(server: http.Server | http2.Http2Server): Promise<string> {
 	return promise;
 }
 
-function close(server: http.Server | http2.Http2Server): Promise<void> {
+function close(server: http2.Http2Server): Promise<void> {
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	server.close(error => (error ? reject(error) : resolve()));
 	return promise;
@@ -53,21 +49,11 @@ beforeAll(async () => {
 		void Promise.resolve(respond(stream, headers)).catch(error => stream.destroy(error));
 	});
 	h2BaseUrl = await listen(h2Server);
-
-	const authPayload = toBinary(
-		GetUserJwtResponseSchema,
-		create(GetUserJwtResponseSchema, { userJwt: "jwt", customApiServerUrl: h2BaseUrl }),
-	);
-	authServer = http.createServer((_request, response) => {
-		response.writeHead(200, { "content-type": "application/proto" });
-		response.end(authPayload);
-	});
-	authBaseUrl = await listen(authServer);
 });
 
 afterAll(async () => {
 	await disposeH2Pool();
-	await Promise.all([close(authServer), close(h2Server)]);
+	await close(h2Server);
 });
 
 function model(): Model<"devin-agent"> {
@@ -76,7 +62,7 @@ function model(): Model<"devin-agent"> {
 		name: "Devin Transport Test",
 		api: "devin-agent",
 		provider: "devin",
-		baseUrl: authBaseUrl,
+		baseUrl: h2BaseUrl,
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -90,6 +76,7 @@ describe("streamDevin shared HTTP/2 transport", () => {
 		respond = async (stream, headers) => {
 			expect(headers[":path"]).toBe("/exa.api_server_pb.ApiServerService/GetChatMessage");
 			expect(headers.te).toBe("trailers");
+			expect(headers.authorization).toBe("Basic devin-session-token$token");
 			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 			const frame = responseFrame("split frame");
 			await writeChunk(stream, frame.subarray(0, 2));

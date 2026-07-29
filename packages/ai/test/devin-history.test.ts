@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { gunzipSync } from "node:zlib";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { fromBinary } from "@bufbuild/protobuf";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageRequestSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 
 const devinModel: Model<"devin-agent"> = buildModel({
 	id: "devin-test",
@@ -44,13 +44,11 @@ function assistant(overrides: Partial<AssistantMessage>): AssistantMessage {
 }
 
 async function captureRequest(context: Context) {
-	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 	let requestPayload: Uint8Array | undefined;
-	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-		if (String(input).includes("GetUserJwt")) return new Response(authPayload);
+	const fetchImpl: FetchImpl = async (_input: string | URL | Request, init?: RequestInit) => {
 		requestPayload = new Uint8Array(init?.body as ArrayBuffer);
 		return new Response(new Uint8Array());
-	}) as typeof fetch;
+	};
 
 	await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
 	if (!requestPayload) throw new Error("Devin chat request was not captured");

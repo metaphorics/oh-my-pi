@@ -1,9 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { create, toBinary } from "@bufbuild/protobuf";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 
 /**
  * Regression for #4228: a Devin Connect frame header advertising an outsized
@@ -39,15 +38,12 @@ function corruptFrameHeader(advertisedLen: number): Uint8Array {
 
 describe("streamDevin frame length cap", () => {
 	it("rejects a frame advertising a payload above the 16 MiB cap without buffering it", async () => {
-		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 		// 32 MiB advertised — twice the cap, well below UINT32_MAX so the
 		// concat-forever bug would silently swallow it on the vulnerable branch.
 		const header = corruptFrameHeader(32 * 1024 * 1024);
 		let concatBytes = 0;
 
-		const fetchImpl = (async (input: string | URL | Request) => {
-			const url = String(input);
-			if (url.includes("GetUserJwt")) return new Response(authPayload);
+		const fetchImpl: FetchImpl = async () => {
 			return new Response(
 				new ReadableStream<Uint8Array>({
 					async pull(controller) {
@@ -62,7 +58,7 @@ describe("streamDevin frame length cap", () => {
 				}),
 				{ status: 200 },
 			);
-		}) as typeof fetch;
+		};
 
 		const stream = streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl });
 		const result = await stream.result();
@@ -77,12 +73,9 @@ describe("streamDevin frame length cap", () => {
 	});
 
 	it("carries the envelope diagnostic on the error event and finalized message", async () => {
-		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 		const header = corruptFrameHeader(64 * 1024 * 1024);
 
-		const fetchImpl = (async (input: string | URL | Request) => {
-			const url = String(input);
-			if (url.includes("GetUserJwt")) return new Response(authPayload);
+		const fetchImpl: FetchImpl = async () => {
 			return new Response(
 				new ReadableStream<Uint8Array>({
 					async pull(controller) {
@@ -92,7 +85,7 @@ describe("streamDevin frame length cap", () => {
 				}),
 				{ status: 200 },
 			);
-		}) as typeof fetch;
+		};
 
 		const stream = streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl });
 		let errorEvent:

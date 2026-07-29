@@ -37,14 +37,14 @@ class DevinOAuthFlow extends OAuthCallbackFlow {
 		return crypto.randomUUID();
 	}
 
-	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
+	async generateAuthUrl(state: string, _redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		this.#pkce = await generatePKCE();
 		const params = new URLSearchParams({
-			redirect_uri: redirectUri,
 			state,
 			prompt: "select_account",
 			code_challenge: this.#pkce.challenge,
 			code_challenge_method: "S256",
+			cli_pkce_marker: "1",
 		});
 
 		return {
