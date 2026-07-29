@@ -60,6 +60,7 @@ import {
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
 	gitLabDuoWorkflowModelManagerOptions,
+	kiroModelManagerOptions,
 	zaiModelManagerOptions,
 } from "./special";
 
@@ -219,6 +220,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["KILO_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => kiloModelManagerOptions(config),
 		catalogDiscovery: { label: "Kilo Gateway", allowUnauthenticated: true },
+	},
+	{
+		id: "kiro",
+		defaultModel: "gpt-5.6-sol",
+		envVars: ["KIRO_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => kiroModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Kiro", envVars: ["KIRO_API_KEY"], oauthProvider: "kiro" },
 	},
 	{
 		id: "kimi-code",

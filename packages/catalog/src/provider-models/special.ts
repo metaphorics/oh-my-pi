@@ -2,6 +2,7 @@ import { once } from "@oh-my-pi/pi-utils";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
+import type { KiroModelDiscoveryOptions } from "../discovery/kiro";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
@@ -202,6 +203,36 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Kiro
+// ---------------------------------------------------------------------------
+
+export interface KiroModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	profileArn?: string;
+	region?: string;
+	fetch?: KiroModelDiscoveryOptions["fetch"];
+}
+
+export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): ModelManagerOptions<"kiro-agent"> {
+	const { apiKey, baseUrl, fetch, profileArn, region } = config;
+	return {
+		providerId: "kiro",
+		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
+		...(apiKey
+			? {
+					fetchDynamicModels: async () => {
+						const { fetchKiroModels } = await kiroDiscovery();
+						return fetchKiroModels({ apiKey, baseUrl, fetch, profileArn, region });
+					},
+				}
+			: undefined),
+	};
+}
+
+const kiroDiscovery = once(() => import("../discovery/kiro"));
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

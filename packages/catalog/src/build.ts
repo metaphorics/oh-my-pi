@@ -13,6 +13,7 @@
 import { buildAnthropicCompat } from "./compat/anthropic";
 import { buildBedrockCompat } from "./compat/bedrock";
 import { buildDevinCompat } from "./compat/devin";
+import { buildKiroCompat } from "./compat/kiro";
 import { buildOpenAICompat, buildOpenAIResponsesCompat, buildOpenRouterCompat } from "./compat/openai";
 import { resolveModelThinking } from "./model-thinking";
 import type { Api, CompatOf, Model, ModelSpec } from "./types";
@@ -88,6 +89,8 @@ export function buildCompat(spec: ModelSpec<Api>): CompatOf<Api> {
 			return buildBedrockCompat(spec as ModelSpec<"bedrock-converse-stream">);
 		case "devin-agent":
 			return buildDevinCompat(spec as ModelSpec<"devin-agent">);
+		case "kiro-agent":
+			return buildKiroCompat(spec as ModelSpec<"kiro-agent">);
 		default:
 			return undefined;
 	}
