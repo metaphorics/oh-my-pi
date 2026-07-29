@@ -494,7 +494,11 @@ describe("offline SQLite salvage", () => {
 		await createAgentSource();
 		const result = await runStorageRepair(
 			{ target: "agent", apply: true, agentDir: root },
-			{ beforeBackupWrite: () => { throw new Error("backup refusal"); } },
+			{
+				beforeBackupWrite: () => {
+					throw new Error("backup refusal");
+				},
+			},
 		);
 		expect(result.status).toBe("refused");
 		expect(result.manualNextStep).toBe("Repair was refused. Do not alter live storage or install the candidate.");
@@ -857,7 +861,12 @@ describe("offline SQLite salvage", () => {
 			message("second", "2026-01-01T00:00:01.000Z", "second queued", { timestamp: 1_767_225_602_100 }),
 		]);
 
-		const result = await runStorageRepair({ target: "history", historySource: "sessions", apply: true, agentDir: root });
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
 		expect(result.status).toBe("ready");
 		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
 		try {
@@ -890,7 +899,12 @@ describe("offline SQLite salvage", () => {
 			{ timestamp: "2026-01-01T00:00:10.000Z", parentSession: origin },
 		);
 
-		const result = await runStorageRepair({ target: "history", historySource: "sessions", apply: true, agentDir: root });
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
 		expect(result.status).toBe("ready");
 		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
 		try {
@@ -920,7 +934,12 @@ describe("offline SQLite salvage", () => {
 			{ timestamp: "2026-01-01T00:00:00.000Z", parentSession: "missing-parent" },
 		);
 
-		const result = await runStorageRepair({ target: "history", historySource: "sessions", apply: true, agentDir: root });
+		const result = await runStorageRepair({
+			target: "history",
+			historySource: "sessions",
+			apply: true,
+			agentDir: root,
+		});
 		expect(result.status).toBe("ready");
 		const db = new Database(result.candidate, { readonly: true, safeIntegers: true });
 		try {

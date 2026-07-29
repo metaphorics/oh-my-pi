@@ -200,7 +200,10 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 				continue;
 			}
 			recordOrdinal += 1;
-			assertInvariant(typeof record.id === "string" && record.id.length > 0, `Invalid record id in ${file.path}:${physicalLine}`);
+			assertInvariant(
+				typeof record.id === "string" && record.id.length > 0,
+				`Invalid record id in ${file.path}:${physicalLine}`,
+			);
 			const outerTimestamp = parsedTimestamp(record.timestamp, `record ${physicalLine} in ${file.path}`);
 			if (record.type !== "message") continue;
 			const message = record.message;
@@ -215,8 +218,19 @@ async function parseSession(file: SessionFileManifest, promptDb: Database) {
 			const prompt = promptContent(typed.content, `${file.path}:${physicalLine}`).trim();
 			if (prompt.length === 0) continue;
 			const innerTimestamp = typed.timestamp;
-			const timestamp = typeof innerTimestamp === "number" && Number.isFinite(innerTimestamp) ? Math.trunc(innerTimestamp) : outerTimestamp;
-			insert.run(BigInt(timestamp), file.canonicalPath, BigInt(recordOrdinal), record.id, prompt, header.cwd, header.id);
+			const timestamp =
+				typeof innerTimestamp === "number" && Number.isFinite(innerTimestamp)
+					? Math.trunc(innerTimestamp)
+					: outerTimestamp;
+			insert.run(
+				BigInt(timestamp),
+				file.canonicalPath,
+				BigInt(recordOrdinal),
+				record.id,
+				prompt,
+				header.cwd,
+				header.id,
+			);
 			inserted += 1;
 		}
 		assertInvariant(physicalLine >= 1 && header, `Incomplete session file: ${file.path}`);
