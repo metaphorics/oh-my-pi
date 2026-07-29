@@ -302,8 +302,8 @@ export interface OpenAICompat {
 	vercelGatewayRouting?: VercelGatewayRouting;
 	/** Extra fields to include in request body (e.g. gateway routing hints for OpenClaw-style proxies). */
 	extraBody?: Record<string, unknown>;
-	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
-	promptCacheSessionHeader?: "x-grok-conv-id";
+	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset (`x-grok-conv-id` for Grok, `x-affinity` for Mistral). */
+	promptCacheSessionHeader?: "x-grok-conv-id" | "x-affinity";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
 	/**

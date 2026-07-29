@@ -2528,7 +2528,7 @@ describe("AuthStorage claude oauth ranking", () => {
 		expect(apiKey).toBe("api-acct-clocked");
 	});
 
-	test("resolves equal-priority accounts to one deterministic pick", async () => {
+	test("resolves equal-priority accounts to a deterministic per-session pick", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
 		await authStorage.set("anthropic", [
@@ -2547,8 +2547,22 @@ describe("AuthStorage claude oauth ranking", () => {
 			);
 		}
 
+		// Equal-rank accounts resolve through the session-stable rendezvous-hash
+		// tie-breaker: each session deterministically maps to exactly one account,
+		// and distinct sessions spread across the pool rather than collapsing onto
+		// a single account.
 		const counts = await countApiKeySelections(authStorage, "anthropic", "weighted-claude-equal", 200);
-		expect(Math.max(countFor(counts, "api-acct-a"), countFor(counts, "api-acct-b"))).toBe(200);
+		expect(countFor(counts, "api-acct-a")).toBeGreaterThan(0);
+		expect(countFor(counts, "api-acct-b")).toBeGreaterThan(0);
+		expect(countFor(counts, "api-acct-a") + countFor(counts, "api-acct-b")).toBe(200);
+
+		// Deterministic per session: the same session id picks the same account
+		// on every call.
+		for (let index = 0; index < 20; index += 1) {
+			const first = await authStorage.getApiKey("anthropic", `weighted-claude-equal-${index}`);
+			const second = await authStorage.getApiKey("anthropic", `weighted-claude-equal-${index}`);
+			expect(second).toBe(first);
+		}
 	});
 
 	test("routes every session to the top-ranked account without weighted spread", async () => {

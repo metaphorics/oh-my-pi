@@ -101,6 +101,16 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 	return value;
 }
 
+/**
+ * Decode a captured Codex SSE request body. The provider zstd-compresses the
+ * body by default, so a binary payload is decompressed before JSON parsing.
+ */
+function decodeCodexRequestBody(body: RequestInit["body"]): string {
+	if (typeof body === "string") return body;
+	if (body instanceof Uint8Array) return new TextDecoder().decode(Bun.zstdDecompressSync(body));
+	throw new Error("expected a string or binary Codex request body");
+}
+
 function parseTurnMetadata(clientMetadata: Record<string, unknown>): Record<string, unknown> {
 	const encoded = clientMetadata["x-codex-turn-metadata"];
 	if (typeof encoded !== "string") throw new Error("expected x-codex-turn-metadata");
@@ -441,7 +451,7 @@ describe("openai-codex streaming", () => {
 		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
 		let capturedBody: Record<string, unknown> | undefined;
 		const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
-			capturedBody = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+			capturedBody = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
 			return new Response(createCompletedCodexSse("Hello"), {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
@@ -471,10 +481,8 @@ describe("openai-codex streaming", () => {
 		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
 		let capturedText: unknown;
 		const fetchMock: FetchImpl = async (_input, init) => {
-			if (typeof init?.body === "string") {
-				const parsed: { text?: unknown } = JSON.parse(init.body);
-				capturedText = parsed.text;
-			}
+			const parsed: { text?: unknown } = JSON.parse(decodeCodexRequestBody(init?.body));
+			capturedText = parsed.text;
 			return new Response(createCompletedCodexSse("Hello"), {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
@@ -1800,7 +1808,7 @@ describe("openai-codex streaming", () => {
 			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", service_tier: "default", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
 		].join("\n\n")}\n\n`;
 		const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
-			capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			capturedBody = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
 			return new Response(sse, {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
@@ -2267,7 +2275,7 @@ describe("openai-codex streaming", () => {
 				expect(headers?.get("x-client-request-id")).toBe(sessionId);
 
 				// Verify sessionId is set in request body as prompt_cache_key
-				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+				const body = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
 				expect(body?.prompt_cache_key).toBe(sessionId);
 
 				return new Response(stream, {
@@ -2324,8 +2332,7 @@ describe("openai-codex streaming", () => {
 			}
 			if (url === "https://chatgpt.com/backend-api/codex/responses") {
 				capturedHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
-				capturedBody =
-					typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+				capturedBody = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
 				return new Response(createCompletedCodexSse("Hello"), {
 					status: 200,
 					headers: { "content-type": "text/event-stream" },
@@ -2362,8 +2369,7 @@ describe("openai-codex streaming", () => {
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			if (url === "https://chatgpt.com/backend-api/codex/responses") {
-				capturedBody =
-					typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+				capturedBody = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
 				return new Response(createCompletedCodexSse("Hello"), {
 					status: 200,
 					headers: { "content-type": "text/event-stream" },
@@ -2455,7 +2461,7 @@ describe("openai-codex streaming", () => {
 				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
 			}
 			if (url === "https://chatgpt.com/backend-api/codex/responses") {
-				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+				const body = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
 				expect(body?.reasoning).toEqual({ effort: "low", summary: "auto" });
 
 				return new Response(stream, {
@@ -2766,8 +2772,7 @@ describe("openai-codex streaming", () => {
 			continuationHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
 			expect(continuationHeaders.get("x-codex-turn-state")).toBe("ws-turn-state-1");
 			expect(continuationHeaders.get("x-models-etag")).toBe("models-etag-1");
-			if (typeof init?.body !== "string") throw new Error("expected an SSE request body");
-			const body: unknown = JSON.parse(init.body);
+			const body: unknown = JSON.parse(decodeCodexRequestBody(init?.body));
 			continuationRequest = requireRecord(body, "SSE continuation request");
 			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
 		});
@@ -5053,7 +5058,7 @@ describe("openai-codex SSE statelessness", () => {
 
 	function createCapturingFetch(sentRequests: Array<Record<string, unknown>>): FetchImpl {
 		return vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-			sentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			sentRequests.push(JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>);
 			return new Response(createStatefulCodexSse(`Answer ${sentRequests.length}`, `resp_${sentRequests.length}`), {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },

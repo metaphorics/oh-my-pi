@@ -59,6 +59,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { clampMaxTokensToContext, estimatePromptTokens } from "../utils/output-budget";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
@@ -3019,14 +3020,11 @@ function createClient(
 	return { client, isOAuthToken: oauthToken };
 }
 
-function disableThinkingIfToolChoiceForced(
-	params: MessageCreateParamsStreaming,
-	model: Model<"anthropic-messages">,
-): void {
-	const toolChoice = params.tool_choice;
-	if (!toolChoice) return;
-	if (toolChoice.type !== "any" && toolChoice.type !== "tool") return;
-
+/** Drop thinking (and its context-management directive) from a request.
+ *  Adaptive-only models can't be switched off by omitting `thinking`, so their
+ *  effort is pinned to the lowest level instead. Shared by the forced-tool-choice
+ *  and thinking-budget reconciliation paths so they disable thinking identically. */
+function disableThinking(params: MessageCreateParamsStreaming, model: Model<"anthropic-messages">): void {
 	delete params.thinking;
 	delete params.context_management;
 
@@ -3047,11 +3045,20 @@ function disableThinkingIfToolChoiceForced(
 
 	const outputConfig = params.output_config as AnthropicOutputConfig | undefined;
 	if (!outputConfig) return;
-
 	delete outputConfig.effort;
 	if (Object.keys(outputConfig).length === 0) {
 		delete params.output_config;
 	}
+}
+
+function disableThinkingIfToolChoiceForced(
+	params: MessageCreateParamsStreaming,
+	model: Model<"anthropic-messages">,
+): void {
+	const toolChoice = params.tool_choice;
+	if (!toolChoice) return;
+	if (toolChoice.type !== "any" && toolChoice.type !== "tool") return;
+	disableThinking(params, model);
 }
 
 function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAllowedTokens: number): void {
@@ -3077,6 +3084,36 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAll
 		);
 	}
 	thinking.budget_tokens = clampedBudget;
+}
+
+/** Minimum viable Anthropic extended-thinking budget; below this the API offers
+ *  no useful reasoning, so the turn is better off with thinking disabled. */
+const MIN_THINKING_BUDGET_TOKENS = 1024;
+
+/**
+ * Restore the `max_tokens > thinking.budget_tokens` invariant after the
+ * context-window clamp shrinks `max_tokens`. {@link ensureMaxTokensForThinking}
+ * guarantees `budget + OUTPUT_FALLBACK_BUFFER <= max` before the clamp runs;
+ * this re-establishes it on the clamped value using the same buffer, reducing
+ * the budget when it still fits and disabling thinking entirely when too little
+ * headroom remains for a viable budget.
+ */
+function reconcileThinkingForClampedMaxTokens(
+	params: MessageCreateParamsStreaming,
+	model: Model<"anthropic-messages">,
+): void {
+	const thinking = params.thinking;
+	if (thinking?.type !== "enabled") return;
+	const maxTokens = params.max_tokens;
+	if (maxTokens === undefined) return;
+	const budgetTokens = thinking.budget_tokens ?? 0;
+	if (budgetTokens + OUTPUT_FALLBACK_BUFFER <= maxTokens) return;
+	const clampedBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
+	if (clampedBudget >= MIN_THINKING_BUDGET_TOKENS) {
+		thinking.budget_tokens = clampedBudget;
+		return;
+	}
+	disableThinking(params, model);
 }
 
 type CacheControlBlock = {
@@ -3579,6 +3616,13 @@ function buildParams(
 
 	disableThinkingIfToolChoiceForced(params, model);
 	ensureMaxTokensForThinking(params, maxOutputTokens);
+	// Clamp max output tokens so prompt + output stays within the context window.
+	params.max_tokens = clampMaxTokensToContext({
+		requestedMaxTokens: params.max_tokens,
+		contextWindow: model.contextWindow ?? undefined,
+		estimatedPromptTokens: estimatePromptTokens(context.systemPrompt?.join("\n"), context.messages, context.tools),
+	});
+	reconcileThinkingForClampedMaxTokens(params, model);
 	applyPromptCaching(params, cacheControl);
 	enforceCacheControlLimit(params, 4);
 	normalizeCacheControlTtlOrdering(params);

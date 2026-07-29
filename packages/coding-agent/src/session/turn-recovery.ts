@@ -832,7 +832,7 @@ export class TurnRecovery {
 		if (AIError.isContextOverflow(message, contextWindow)) return false;
 
 		if (this.isClassifierRefusal(message)) return true;
-		return AIError.retriable(id, { replayUnsafe: this.#hasReplayUnsafeToolOutput(message) });
+		return AIError.retriable(id, { replayUnsafe: this.#hasReplayUnsafeOutput(message) });
 	}
 
 	/**
@@ -900,12 +900,19 @@ export class TurnRecovery {
 	}
 	/**
 	 * Retried turns remove the failed assistant message from active context.
-	 * Text/thinking-only partials are safe to discard and replay. Retained
-	 * tool calls are not: a completed tool call may already have emitted its
-	 * tool result after this assistant message, so replaying can duplicate work.
+	 * Thinking-only partials are safe to discard and replay: reasoning models
+	 * routinely stall after long thinking with no visible output, and duplicated
+	 * thinking display is materially lower harm than duplicated final text.
+	 * Whitespace-only text is likewise safe since nothing meaningful reached the
+	 * user. Completed visible text and retained tool calls are NOT safe: visible
+	 * text already reached the user, so replaying the turn duplicates it; a
+	 * completed tool call may already have emitted its tool result after this
+	 * assistant message, so replaying can duplicate work.
 	 */
-	#hasReplayUnsafeToolOutput(message: AssistantMessage): boolean {
-		return message.content.some(block => block.type === "toolCall");
+	#hasReplayUnsafeOutput(message: AssistantMessage): boolean {
+		return message.content.some(
+			block => block.type === "toolCall" || (block.type === "text" && block.text.trim().length > 0),
+		);
 	}
 
 	/**
@@ -1126,7 +1133,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
 		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
-		if (this.#hasReplayUnsafeToolOutput(message)) return false;
+		if (this.#hasReplayUnsafeOutput(message)) return false;
 		const currentSelector = formatRetryFallbackSelector(model, this.#host.thinkingLevel());
 		const role = this.#activeRetryFallback?.role ?? this.resolveRetryFallbackRole(currentSelector);
 		if (!role) return false;

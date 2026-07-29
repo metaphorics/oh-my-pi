@@ -13,6 +13,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { $env, $flag, fetchWithRetry, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -39,6 +40,7 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
+import { clampMaxTokensToContext, estimatePromptTokens } from "../utils/output-budget";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
@@ -329,11 +331,30 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				if (tc.any || tc.tool) additionalModelRequestFields = undefined;
 			}
 
+			const maxTokens =
+				options.maxTokens !== undefined
+					? clampMaxTokensToContext({
+							requestedMaxTokens: options.maxTokens,
+							contextWindow: model.contextWindow ?? undefined,
+							estimatedPromptTokens: estimatePromptTokens(
+								context.systemPrompt?.join("\n"),
+								context.messages,
+								context.tools,
+							),
+						})
+					: undefined;
+			// Anthropic-on-Bedrock rejects thinking.budget_tokens >= maxTokens. The
+			// context-window clamp can shrink maxTokens below the budget, so reconcile
+			// the thinking budget the same way the anthropic transport does.
+			if (maxTokens !== undefined) {
+				additionalModelRequestFields = reconcileBedrockThinkingBudget(additionalModelRequestFields, maxTokens);
+			}
+
 			const commandInput: ConverseStreamRequest = {
 				messages: convertedMessages,
 				system: buildSystemPrompt(context.systemPrompt, promptCachePolicy),
 				inferenceConfig: {
-					maxTokens: options.maxTokens,
+					maxTokens,
 					temperature: options.temperature,
 					topP: options.topP,
 				},
@@ -1035,6 +1056,37 @@ function buildAdditionalModelRequestFields(
 	}
 
 	return result;
+}
+
+/** Minimum viable Bedrock extended-thinking budget; below this the model offers
+ *  no useful reasoning, so the turn is better off with thinking disabled. */
+const MIN_BEDROCK_THINKING_BUDGET_TOKENS = 1024;
+
+/**
+ * Restore the `maxTokens > thinking.budget_tokens` invariant after the
+ * context-window clamp shrinks `inferenceConfig.maxTokens`. Bedrock exposes the
+ * Anthropic thinking budget inside `additionalModelRequestFields.thinking`,
+ * which must stay below `maxTokens` or the request is rejected with HTTP 400.
+ * Uses the same buffer as the anthropic path and disables thinking entirely when
+ * too little headroom remains for a viable budget.
+ */
+function reconcileBedrockThinkingBudget(
+	additionalModelRequestFields: Record<string, unknown> | undefined,
+	maxTokens: number,
+): Record<string, unknown> | undefined {
+	const thinking = additionalModelRequestFields?.thinking as { type?: string; budget_tokens?: number } | undefined;
+	if (thinking?.type !== "enabled") return additionalModelRequestFields;
+	const budgetTokens = thinking.budget_tokens ?? 0;
+	if (budgetTokens + OUTPUT_FALLBACK_BUFFER <= maxTokens) return additionalModelRequestFields;
+	const clampedBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
+	if (clampedBudget >= MIN_BEDROCK_THINKING_BUDGET_TOKENS) {
+		thinking.budget_tokens = clampedBudget;
+		return additionalModelRequestFields;
+	}
+	// Too little headroom for a viable thinking budget — drop thinking entirely.
+	const next = { ...additionalModelRequestFields };
+	delete next.thinking;
+	return Object.keys(next).length > 0 ? next : undefined;
 }
 
 /**

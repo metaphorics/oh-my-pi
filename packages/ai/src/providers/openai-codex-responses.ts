@@ -3906,6 +3906,24 @@ async function getOrCreateCodexWebSocketConnection(
 	return state.connection;
 }
 
+/**
+ * Compress an SSE request body with zstd. Returns `undefined` when
+ * compression is disabled or fails, in which case the caller sends the
+ * plain JSON string without a `content-encoding` header.
+ */
+function compressCodexRequestBody(bodyJson: string): Uint8Array | undefined {
+	if (!$flag("PI_CODEX_ZSTD", true)) return undefined;
+	try {
+		return Bun.zstdCompressSync(bodyJson, { level: 3 });
+	} catch (error) {
+		CODEX_DEBUG &&
+			logger.debug("[codex] codex request body compression failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		return undefined;
+	}
+}
+
 async function openCodexSseEventStream(
 	url: string,
 	requestHeaders: Record<string, string> | undefined,
@@ -3956,12 +3974,17 @@ async function openCodexSseEventStream(
 			clearPreResponseTimeout = undefined;
 		}
 	};
+	const bodyJson = JSON.stringify(body);
+	const compressedBody = compressCodexRequestBody(bodyJson);
+	if (compressedBody !== undefined) {
+		headers.set("content-encoding", "zstd");
+	}
 	let response: Response;
 	try {
 		response = await fetchWithRetry(url, {
 			method: "POST",
 			headers,
-			body: JSON.stringify(body),
+			body: compressedBody ?? bodyJson,
 			signal,
 			prepareInit: () => {
 				const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);

@@ -301,8 +301,13 @@ describe("AuthStorage account rotation", () => {
 
 		expect(result).toBe("access-d");
 		expect(attemptedKeys.at(-1)).toBe("access-d");
-		expect([...attemptedKeys].sort()).toEqual(["access-a", "access-b", "access-c", "access-d"]);
-		expect(new Set(attemptedKeys).size).toBe(4);
+		// The HRW session-affinity tie-breaker makes the rotation order session-stable
+		// rather than round-robin, so the healthy sibling can be reached without
+		// exhausting every failing account first. The contract under test is that
+		// rotation still reaches the healthy fourth sibling and stops there, never
+		// re-attempting an account.
+		expect(attemptedKeys).toContain("access-d");
+		expect(new Set(attemptedKeys).size).toBe(attemptedKeys.length);
 	});
 
 	test("provider login invalidates only that provider's persisted session stickiness", async () => {

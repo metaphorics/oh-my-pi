@@ -88,6 +88,14 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 			inflight.delete(cacheKey);
 		}
 	})();
+	// The shared resolution is deliberately detached from any caller's abort
+	// signal so a single aborted request cannot fail concurrent waiters. When
+	// every waiter has already bailed out via its own signal race, the shared
+	// promise still settles on its own timeout — attach a no-op observer so its
+	// rejection is never reported as unhandled. Live waiters still surface the
+	// error through their own `raceWithSignal` observer above; this swallow only
+	// owns the unobserved (all-aborted) case.
+	promise.catch(() => {});
 	inflight.set(cacheKey, promise);
 	return raceWithSignal(promise, opts.signal);
 }

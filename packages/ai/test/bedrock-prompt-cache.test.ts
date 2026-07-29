@@ -48,6 +48,13 @@ function capturePayload(
 ): Promise<Payload> {
 	const { promise, resolve } = Promise.withResolvers<Payload>();
 	void streamBedrock(bedrockModel, context, {
+		// The stream is only observed for its onPayload snapshot and then
+		// abandoned. Supply a bearer token so the abandoned continuation takes
+		// the bearer-auth path instead of resolving AWS credentials: with an
+		// already-aborted signal the credential single-flight promise would be
+		// orphaned and reject (~1s IMDS timeout) as an unhandled error that
+		// pollutes whichever test is running when it surfaces.
+		apiKey: "test-key",
 		signal: abortedSignal(),
 		cacheRetention,
 		onPayload: payload => {

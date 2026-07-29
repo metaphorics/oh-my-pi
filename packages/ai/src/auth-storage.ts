@@ -1060,6 +1060,19 @@ function compareUsageRankingMetric(left: number, right: number): number {
 	return Math.abs(delta) <= tolerance ? 0 : delta;
 }
 
+/**
+ * Highest-Random-Weight (rendezvous) score for a session/candidate pair.
+ * Higher score wins. Used as the final tie-breaker among equally-ranked
+ * credentials so a pool change reassigns only the sessions that hash to the
+ * changed candidate, preserving prompt-cache warmth for the rest.
+ *
+ * SHA-256 over `${sessionKey}\0${candidateKey}`, first 8 digest bytes
+ * big-endian as an unsigned 64-bit integer.
+ */
+export function rendezvousScore(sessionKey: string, candidateKey: string): bigint {
+	return new Bun.CryptoHasher("sha256").update(`${sessionKey}\0${candidateKey}`).digest().readBigUInt64BE(0);
+}
+
 function resolveDefaultUsageProvider(provider: Provider): UsageProvider | undefined {
 	return DEFAULT_USAGE_PROVIDER_MAP.get(provider);
 }
@@ -1219,6 +1232,8 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	primaryUsed: number;
 	primaryRequiredDrain: number;
 	orderPos: number;
+	/** Rendezvous hash score for session-stable tie-breaking; undefined when no sessionId. */
+	hrwScore: bigint | undefined;
 };
 type RankedOAuthCandidate = UsageRankedCandidate<OAuthCredential>;
 type RankedApiKeyCandidate = UsageRankedCandidate<ApiKeyCredential>;
@@ -1647,6 +1662,19 @@ export class AuthStorage {
 		return order;
 	}
 
+	/**
+	 * Rendezvous-hash tie-break score for a candidate under a given session.
+	 * Returns undefined when no sessionId is available so the comparator falls
+	 * back to orderPos unchanged. The candidateKey is the durable stored-row id
+	 * when present, else `${provider}:${credentialIndex}`.
+	 */
+	#candidateHrwScore(sessionId: string | undefined, provider: string, credentialIndex: number): bigint | undefined {
+		if (!sessionId) return undefined;
+		const stored = this.#getStoredCredentials(provider)[credentialIndex];
+		const candidateKey = stored?.id !== undefined ? String(stored.id) : `${provider}:${credentialIndex}`;
+		return rendezvousScore(sessionId, candidateKey);
+	}
+
 	#toScopedBackoffKey(providerKey: string, blockScope: string | undefined): string {
 		return blockScope ? `${providerKey}\0${blockScope}` : providerKey;
 	}
@@ -1928,6 +1956,7 @@ export class AuthStorage {
 		blockScope?: string;
 		/** Scopes a block may live under for this request; reads honour all of them. */
 		blockScopes?: readonly string[];
+		sessionId?: string;
 	}): Promise<ApiKeyCandidate[]> {
 		const nowMs = Date.now();
 		const { strategy } = args;
@@ -2012,6 +2041,7 @@ export class AuthStorage {
 				primaryUsed: this.#normalizeUsageFraction(primary),
 				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
+				hrwScore: this.#candidateHrwScore(args.sessionId, args.provider, selection.index),
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, "none");
@@ -2060,6 +2090,7 @@ export class AuthStorage {
 			rankingContext,
 			blockScope,
 			blockScopes,
+			sessionId,
 		});
 		return candidates[0]?.selection ?? fallback;
 	}
@@ -4339,7 +4370,17 @@ export class AuthStorage {
 		planRequirement: OpenAICodexPlanRequirement,
 	): number {
 		const priority = this.#compareUsageRankedCandidatePriority(left, right, planRequirement);
-		return priority !== 0 ? priority : left.orderPos - right.orderPos;
+		if (priority !== 0) return priority;
+		// Session-stable HRW tie-breaker: when a session id was available at rank
+		// time, prefer the candidate with the higher rendezvous score so equal-rank
+		// pools resolve deterministically per session. Pool changes move only the
+		// sessions that hash to the changed candidate. When no session id was
+		// available (hrwScore is undefined) today's orderPos ordering is preserved
+		// byte-for-byte.
+		if (left.hrwScore !== undefined && right.hrwScore !== undefined && left.hrwScore !== right.hrwScore) {
+			return left.hrwScore > right.hrwScore ? -1 : 1;
+		}
+		return left.orderPos - right.orderPos;
 	}
 
 	#orderUsageRankedCandidates<T extends AuthCredential>(
@@ -4366,6 +4407,7 @@ export class AuthStorage {
 		blockScope?: string;
 		/** Scopes a block may live under for this request; reads honour all of them. */
 		blockScopes?: readonly string[];
+		sessionId?: string;
 	}): Promise<OAuthCandidate[]> {
 		const nowMs = Date.now();
 		const { strategy } = args;
@@ -4469,6 +4511,7 @@ export class AuthStorage {
 				primaryUsed: this.#normalizeUsageFraction(primary),
 				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
+				hrwScore: this.#candidateHrwScore(args.sessionId, args.provider, selection.index),
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, args.planRequirement);
@@ -4568,6 +4611,7 @@ export class AuthStorage {
 					rankingContext,
 					blockScope,
 					blockScopes,
+					sessionId,
 				})
 			: order
 					.map(idx => credentials[idx])
