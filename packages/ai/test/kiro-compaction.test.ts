@@ -74,11 +74,13 @@ function exceptionFrame(exceptionType: string, body: string): Uint8Array {
 function toolUseFrame(): Uint8Array {
 	return encodeFrame(
 		{ ":message-type": "event", ":event-type": "toolUseEvent" },
-		new TextEncoder().encode({
-			toolUseId: "unfinished_tool",
-			name: "read_file",
-			input: JSON.stringify({ path: "/tmp/input" }),
-		}),
+		new TextEncoder().encode(
+			JSON.stringify({
+				toolUseId: "unfinished_tool",
+				name: "read_file",
+				input: JSON.stringify({ path: "/tmp/input" }),
+			}),
+		),
 	);
 }
 
@@ -88,7 +90,7 @@ async function startServer(): Promise<string> {
 		sessions.add(session);
 		session.on("close", () => sessions.delete(session));
 	});
-	server.on("stream", stream => {
+	server.on("stream", (stream: http2.ServerHttp2Stream) => {
 		stream.on("data", () => {});
 		if (scenario.kind === "http-error") {
 			stream.respond({ ":status": scenario.status, "content-type": "application/x-amz-json-1.0" });

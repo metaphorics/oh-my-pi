@@ -289,8 +289,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 			calculateCost(model, output.usage);
 			completed = true;
-			const doneReason =
-				output.stopReason === "toolUse" ? "toolUse" : output.stopReason === "length" ? "length" : "stop";
+			const doneReason = output.stopReason;
 			stream.push({ type: "done", reason: doneReason, message: output });
 			stream.end();
 		} catch (error) {
