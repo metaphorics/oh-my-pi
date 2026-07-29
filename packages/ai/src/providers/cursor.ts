@@ -818,9 +818,21 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						const status = trailers["grpc-status"];
 						const msg = trailers["grpc-message"];
 						if (status && status !== "0" && !endStreamError && httpErrorStatus === null) {
+							let decodedMessage: string;
+							try {
+								decodedMessage = decodeURIComponent(String(msg || ""));
+							} catch (error) {
+								if (!(error instanceof URIError)) {
+									// Unexpected failure: route into the normal sealed attempt
+									// path rather than escaping the event callback.
+									settle(error);
+									return;
+								}
+								// Malformed percent escape: preserve the raw trailer text.
+								decodedMessage = String(msg || "");
+							}
 							const numericStatus = Number(status);
 							const authStatus = grpcStatusToAuthStatus(numericStatus);
-							const decodedMessage = decodeURIComponent(String(msg || ""));
 							endStreamError = authStatus
 								? new AIError.CursorCredentialError(`gRPC error ${status}: ${decodedMessage}`, authStatus)
 								: new AIError.ProviderResponseError(`gRPC error ${status}: ${decodedMessage}`, {
