@@ -545,6 +545,16 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				})();
 			};
 
+			const failProtocol = (message: string, cause: unknown): void => {
+				settle(
+					new AIError.ProviderResponseError(`Cursor protocol error: ${message}`, {
+						provider: model.provider,
+						kind: "envelope",
+						cause,
+					}),
+				);
+			};
+
 			let pendingBuffer = Buffer.alloc(0);
 			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
@@ -796,8 +806,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							try {
 								const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
 								processServerMessage(serverMessage);
-							} catch (e) {
-								log("error", "parseServerMessage", { error: String(e) });
+							} catch (error) {
+								log("error", "parseServerMessage", { error: String(error) });
+								failProtocol("malformed response frame", error);
+								break;
 							}
 						}
 					});

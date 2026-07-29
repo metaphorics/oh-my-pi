@@ -11,6 +11,7 @@ import {
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+import { BidiAppendResponseSchema, BidiPollResponseSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/bidi_pb";
 import { Http2Config } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/server_config_pb";
 import { __evictH2PoolEntry, __getH2PoolStats, acquireH2Session } from "../src/providers/cursor/h2-pool";
 import { __evictServerConfigEntry, selectMode } from "../src/providers/cursor/server-config";
@@ -36,7 +37,11 @@ function textDeltaFrame(text: string): Buffer {
 }
 
 function turnEndedFrame(): Buffer {
-	const message = create(AgentServerMessageSchema, {
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, turnEndedMessage()));
+}
+
+function turnEndedMessage() {
+	return create(AgentServerMessageSchema, {
 		message: {
 			case: "interactionUpdate",
 			value: create(InteractionUpdateSchema, {
@@ -44,7 +49,10 @@ function turnEndedFrame(): Buffer {
 			}),
 		},
 	});
-	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+function connectErrorEndStreamFrame(code: string, message: string): Buffer {
+	return frameConnectMessage(Buffer.from(JSON.stringify({ error: { code, message } }), "utf8"), 0x02);
 }
 
 let h2Server: http2.Http2Server | undefined;
@@ -250,6 +258,72 @@ describe("Cursor transport production integration", () => {
 		// H2 pool should NOT have been used for the agent traffic.
 		const stats = __getH2PoolStats();
 		expect(stats.poolCount).toBe(0);
+	});
+
+	it("fails the public stream when a queued turnEnded precedes an HTTP/1 poll sequence gap", async () => {
+		const baseUrl = await startH1Server();
+		const partial = toBinary(
+			AgentServerMessageSchema,
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "interactionUpdate",
+					value: create(InteractionUpdateSchema, {
+						message: { case: "textDelta", value: create(TextDeltaUpdateSchema, { text: "partial" }) },
+					}),
+				},
+			}),
+		);
+		const turnEnded = toBinary(AgentServerMessageSchema, turnEndedMessage());
+
+		handleH1Request = (req, res) => {
+			const url = req.url ?? "";
+			if (url.includes("GetServerConfig")) {
+				res.writeHead(404, { "content-type": "application/json" });
+				res.end();
+				return;
+			}
+			if (url.includes("BidiAppend")) {
+				res.writeHead(200, { "content-type": "application/proto", Connection: "close" });
+				res.end(toBinary(BidiAppendResponseSchema, create(BidiAppendResponseSchema, {})));
+				return;
+			}
+			if (url.includes("RunSSE")) {
+				res.writeHead(200, { "content-type": "application/connect+proto", Connection: "close" });
+				res.end(connectErrorEndStreamFrame("unimplemented", "poll fallback"));
+				return;
+			}
+			if (url.includes("RunPoll")) {
+				const responses = [
+					create(BidiPollResponseSchema, { seqno: 0n, data: Buffer.from(partial).toString("base64") }),
+					create(BidiPollResponseSchema, { seqno: 1n, data: Buffer.from(turnEnded).toString("base64") }),
+					create(BidiPollResponseSchema, { seqno: 3n, data: Buffer.from(partial).toString("base64") }),
+				];
+				res.writeHead(200, { "content-type": "application/connect+proto", Connection: "close" });
+				res.end(
+					Buffer.concat(
+						responses.map(response => frameConnectMessage(toBinary(BidiPollResponseSchema, response))),
+					),
+				);
+				return;
+			}
+			res.writeHead(404);
+			res.end();
+		};
+
+		const stream = streamCursor(makeModel(baseUrl), context, {
+			apiKey: "test-token",
+			useHttp1ForAgent: true,
+			providerRetryWait: async () => {},
+		});
+		const eventTypes: string[] = [];
+		for await (const event of stream) eventTypes.push(event.type);
+		const result = await stream.result();
+
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Cursor HTTP/1 poll sequence violation: gap");
 	});
 
 	it("server-force override wins over local preference", () => {

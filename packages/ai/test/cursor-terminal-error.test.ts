@@ -21,7 +21,8 @@ type Scenario =
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
-	| { kind: "non-2xx-before-turn"; status: number };
+	| { kind: "non-2xx-before-turn"; status: number }
+	| { kind: "malformed-frame-before-turn-ended" };
 
 let server: http2.Http2Server | undefined;
 let activeBaseUrl: string | undefined;
@@ -71,6 +72,11 @@ function connectEndErrorFrame(code: string, message: string): Buffer {
 	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
 }
 
+function malformedProtobufFrame(): Buffer {
+	// Field 1 (length-delimited) is missing its declared payload length.
+	return frameConnectMessage(Buffer.from([0x0a]));
+}
+
 async function startServer(): Promise<string> {
 	server = http2.createServer();
 	server.on("session", session => {
@@ -118,6 +124,12 @@ async function startServer(): Promise<string> {
 
 		if (scenario.kind === "end-before-turn") {
 			stream.write(textDeltaFrame("partial"));
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "malformed-frame-before-turn-ended") {
+			stream.write(Buffer.concat([textDeltaFrame("partial"), malformedProtobufFrame(), turnEndedFrame()]));
 			stream.end();
 			return;
 		}
@@ -248,6 +260,17 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
+	});
+
+	it("rejects malformed protobuf frames before a queued turnEnded without emitting done", async () => {
+		scenario = { kind: "malformed-frame-before-turn-ended" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Cursor protocol error: malformed response frame");
 	});
 
 	it("aborts without emitting done when the signal fires", async () => {

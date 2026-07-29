@@ -393,6 +393,8 @@ async function startPollFallback(
 	let expectedSeq: bigint | undefined;
 	let lastSeqData: string | undefined;
 	let duplicateCount = 0;
+	const sequenceViolation = (detail: string): AIError.ProviderResponseError =>
+		new AIError.ProviderResponseError(`Cursor HTTP/1 poll sequence violation: ${detail}`, { kind: "envelope" });
 
 	try {
 		const pollIterable = agentClient.runPoll(pollRequest, { signal: opts.signal });
@@ -404,9 +406,12 @@ async function startPollFallback(
 				lastSeqData = pollResponse.data;
 				duplicateCount = 0;
 			} else if (pollResponse.seqno === expectedSeq) {
-				if (duplicateCount >= 1 || pollResponse.data !== lastSeqData) {
-					// Reject second consecutive duplicate or altered duplicate content.
-					await closeBridge("fatal");
+				if (duplicateCount >= 1) {
+					await closeBridge("fatal", sequenceViolation(`second consecutive duplicate at ${pollResponse.seqno}`));
+					return;
+				}
+				if (pollResponse.data !== lastSeqData) {
+					await closeBridge("fatal", sequenceViolation(`altered duplicate at ${pollResponse.seqno}`));
 					return;
 				}
 				// First retransmit of an already-delivered frame: tolerate it,
@@ -424,8 +429,12 @@ async function startPollFallback(
 				lastSeqData = pollResponse.data;
 				duplicateCount = 0;
 			} else {
-				// Gap, regression, or changed duplicate: terminal.
-				await closeBridge("fatal");
+				// Gaps and regressions are terminal protocol corruption.
+				const violation = pollResponse.seqno > expectedSeq ? "gap" : "regression";
+				await closeBridge(
+					"fatal",
+					sequenceViolation(`${violation}: expected ${expectedSeq + 1n}, received ${pollResponse.seqno}`),
+				);
 				return;
 			}
 

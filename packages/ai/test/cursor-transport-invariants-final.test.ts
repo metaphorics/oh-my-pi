@@ -328,14 +328,20 @@ describe("Invariant 3: Poll Sequence Validation", () => {
 			});
 
 			const received: string[] = [];
-			for await (const msg of bridge.messages) {
-				if (msg.message.case === "interactionUpdate" && msg.message.value.message.case === "textDelta") {
-					received.push(msg.message.value.message.value.text);
+			let thrown: unknown;
+			try {
+				for await (const msg of bridge.messages) {
+					if (msg.message.case === "interactionUpdate" && msg.message.value.message.case === "textDelta") {
+						received.push(msg.message.value.message.value.text);
+					}
 				}
+			} catch (error) {
+				thrown = error;
 			}
 
 			// "hello" was received; "altered" was rejected before enqueueing and bridge closed fatal
 			expect(received).toEqual(["hello"]);
+			expect(String(thrown)).toContain("Cursor HTTP/1 poll sequence violation: altered duplicate");
 		} finally {
 			await bridge?.close("success").catch(() => {});
 			await closeServerAsync(mockServer);
@@ -401,15 +407,21 @@ describe("Invariant 3: Poll Sequence Validation", () => {
 			});
 
 			const received: string[] = [];
-			for await (const msg of bridge.messages) {
-				if (msg.message.case === "interactionUpdate" && msg.message.value.message.case === "textDelta") {
-					received.push(msg.message.value.message.value.text);
+			let thrown: unknown;
+			try {
+				for await (const msg of bridge.messages) {
+					if (msg.message.case === "interactionUpdate" && msg.message.value.message.case === "textDelta") {
+						received.push(msg.message.value.message.value.text);
+					}
 				}
+			} catch (error) {
+				thrown = error;
 			}
 
 			// First 0n enqueued once; the 1st retransmit is discarded and the
 			// 2nd consecutive duplicate is a fatal sequence violation.
 			expect(received).toEqual(["hello"]);
+			expect(String(thrown)).toContain("Cursor HTTP/1 poll sequence violation: second consecutive duplicate");
 		} finally {
 			await bridge?.close("success").catch(() => {});
 			await closeServerAsync(mockServer);
