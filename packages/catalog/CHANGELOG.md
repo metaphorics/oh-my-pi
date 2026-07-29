@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Cursor Bidi and server-configuration protocol descriptors used by HTTP/1 transport fallback and mode discovery.
+
 ## [17.1.8] - 2026-07-28
 
 ### Added

@@ -4996,6 +4996,16 @@ export const SETTINGS_SCHEMA = {
 			options: TTS_LOCAL_VOICE_OPTIONS,
 		},
 	},
+	"providers.cursor.useHttp1ForAgent": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Prefer Cursor HTTP/1",
+			description: "Use Cursor's HTTP/1 streaming bridge unless the server forces a transport mode",
+		},
+	},
 	"providers.tinyModel": {
 		type: "enum",
 		values: TINY_TITLE_MODEL_VALUES,

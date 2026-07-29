@@ -30,6 +30,17 @@ const TRANSIENT_SYSTEM_CODES: Record<string, true> = {
 const TRANSIENT_MESSAGE_PATTERN =
 	/connection (?:closed|error|refused|reset)|fetch failed|h2 is not supported|network error|other side closed|reset before headers|socket hang up|stream (?:closed|error)|timed? ?out|upstream (?:connect|request) failed/i;
 
+export function normalizeConnectAuthError(
+	error: unknown,
+	createCredentialError: (message: string, status: 401 | 403) => Error,
+): Error {
+	if (error instanceof ConnectError) {
+		if (error.code === Code.Unauthenticated) return createCredentialError(error.message, 401);
+		if (error.code === Code.PermissionDenied) return createCredentialError(error.message, 403);
+	}
+	return error instanceof Error ? error : new Error(String(error));
+}
+
 export function isTransientTransportError(error: unknown): boolean {
 	if (error instanceof AIError.AbortError || error instanceof AIError.ValidationError) return false;
 	if (AIError.isUsageLimit(error) || AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)) return false;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a per-request Cursor HTTP/1 transport preference, with HTTP/2 remaining the default.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes

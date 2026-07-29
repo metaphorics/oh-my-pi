@@ -1,20 +1,26 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { gzipSync } from "node:zlib";
+import { Code, ConnectError, type Transport } from "@connectrpc/connect";
 import {
 	acquireH2Session,
 	CONNECT_COMPRESSED_FLAG,
 	CONNECT_END_STREAM_FLAG,
 	createConnectFrameReader,
+	createHttp1Bridge,
 	disposeH2Pool,
+	disposeHttp1Bridges,
 	encodeConnectFrame,
 	isTransientTransportError,
+	normalizeConnectAuthError,
 	readConnectTrailerError,
 } from "@oh-my-pi/pi-ai";
+import { CursorCredentialError } from "../src/error";
 
 const servers = new Set<http2.Http2Server>();
 
 afterEach(async () => {
+	await disposeHttp1Bridges();
 	await disposeH2Pool();
 	await Promise.all(
 		[...servers].map(server => {
@@ -25,6 +31,13 @@ afterEach(async () => {
 	);
 	servers.clear();
 });
+
+function abortPromise(signal: AbortSignal): Promise<void> {
+	if (signal.aborted) return Promise.reject(signal.reason);
+	const aborted = Promise.withResolvers<void>();
+	signal.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+	return aborted.promise;
+}
 
 async function listen(
 	onStream: (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => void,
@@ -71,6 +84,173 @@ describe("shared Connect framing", () => {
 		);
 		expect(readConnectTrailerError(error)).toEqual({ code: "permission_denied", message: "account unavailable" });
 		expect(readConnectTrailerError(new TextEncoder().encode("{}"))).toBeNull();
+	});
+});
+
+describe("shared HTTP/1 bridge", () => {
+	it("cancels an in-flight append before close resolves", async () => {
+		const appendStarted = Promise.withResolvers<void>();
+		let appendAborted = false;
+		const bridge = await createHttp1Bridge({
+			baseUrl: "http://127.0.0.1",
+			provider: "transport-test",
+			headers: {},
+			requestBytes: new Uint8Array([1]),
+			createRpc(_transport: Transport) {
+				return {
+					async append(_seqno, _data, signal) {
+						appendStarted.resolve();
+						try {
+							await abortPromise(signal);
+						} catch {
+							appendAborted = true;
+							throw new Error("append aborted");
+						}
+					},
+					async *receive(signal) {
+						await abortPromise(signal);
+						yield* [];
+					},
+					async *poll() {
+						yield* [];
+					},
+					decodePoll(data) {
+						return data;
+					},
+				};
+			},
+		});
+		await appendStarted.promise;
+		await bridge.close("dispose");
+		expect(appendAborted).toBeTrue();
+	});
+
+	it("does not decode or re-enqueue an accepted poll retransmission", async () => {
+		let executions = 0;
+		const bridge = await createHttp1Bridge({
+			baseUrl: "http://127.0.0.1",
+			provider: "transport-test",
+			headers: {},
+			requestBytes: new Uint8Array(),
+			createRpc() {
+				return {
+					async append() {},
+					async *receive() {
+						yield* [];
+					},
+					async *poll() {
+						yield { seqno: 0n, data: "exec-0", eof: false };
+						yield { seqno: 0n, data: "exec-0", eof: false };
+						yield { seqno: 1n, data: "exec-1", eof: true };
+					},
+					decodePoll(data) {
+						executions++;
+						return data;
+					},
+				};
+			},
+		});
+		const messages: string[] = [];
+		for await (const message of bridge.messages) messages.push(message);
+		expect(messages).toEqual(["exec-0", "exec-1"]);
+		expect(executions).toBe(2);
+	});
+
+	it("surfaces poll sequence violations as fatal errors", async () => {
+		const bridge = await createHttp1Bridge({
+			baseUrl: "http://127.0.0.1",
+			provider: "transport-test",
+			headers: {},
+			requestBytes: new Uint8Array(),
+			createRpc() {
+				return {
+					async append() {},
+					async *receive() {
+						yield* [];
+					},
+					async *poll() {
+						yield { seqno: 0n, data: "first", eof: false };
+						yield { seqno: 2n, data: "gap", eof: false };
+					},
+					decodePoll(data) {
+						return data;
+					},
+				};
+			},
+		});
+		const iterator = bridge.messages[Symbol.asyncIterator]();
+		expect(await iterator.next()).toEqual({ value: "first", done: false });
+		await expect(iterator.next()).rejects.toThrow("poll sequence violation");
+	});
+
+	it("surfaces receive and poll failures instead of ending normally", async () => {
+		for (const failureAt of ["receive", "poll"] as const) {
+			const fatal = new Error(`${failureAt} failed`);
+			const bridge = await createHttp1Bridge({
+				baseUrl: "http://127.0.0.1",
+				provider: "transport-test",
+				headers: {},
+				requestBytes: new Uint8Array(),
+				createRpc() {
+					return {
+						async append() {},
+						async *receive() {
+							if (failureAt === "receive") throw fatal;
+							yield* [];
+						},
+						async *poll() {
+							if (failureAt === "poll") throw fatal;
+							yield* [];
+						},
+						decodePoll(data) {
+							return data;
+						},
+					};
+				},
+			});
+			const iterator = bridge.messages[Symbol.asyncIterator]();
+			await expect(iterator.next()).rejects.toBe(fatal);
+		}
+	});
+
+	it("normalizes authentication failures at every RPC boundary to a status-bearing credential error", async () => {
+		for (const failureAt of ["append", "receive", "poll"] as const) {
+			const bridge = await createHttp1Bridge({
+				baseUrl: "http://127.0.0.1",
+				provider: "transport-test",
+				headers: {},
+				requestBytes: new Uint8Array(),
+				normalizeError: error =>
+					normalizeConnectAuthError(error, (message, status) => new CursorCredentialError(message, status)),
+				createRpc() {
+					return {
+						async append() {
+							if (failureAt === "append") throw new ConnectError("denied", Code.Unauthenticated);
+						},
+						async *receive(signal) {
+							if (failureAt === "receive") throw new ConnectError("denied", Code.Unauthenticated);
+							if (failureAt === "append") await abortPromise(signal);
+							yield* [];
+						},
+						async *poll() {
+							if (failureAt === "poll") throw new ConnectError("denied", Code.Unauthenticated);
+							yield* [];
+						},
+						decodePoll(data) {
+							return data;
+						},
+					};
+				},
+			});
+			try {
+				await bridge.messages[Symbol.asyncIterator]().next();
+			} catch (error) {
+				expect(error).toBeInstanceOf(CursorCredentialError);
+				expect((error as CursorCredentialError).status).toBe(401);
+				continue;
+			}
+			throw new Error(`Expected an authentication failure from ${failureAt}`);
+		}
 	});
 });
 

@@ -581,6 +581,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	thinkingBudgets?: ThinkingBudgets;
 	/** Cursor exec handlers for local tool execution */
 	cursorExecHandlers?: CursorExecHandlers;
+	/** Prefer Cursor's HTTP/1 bridge unless server discovery forces HTTP/2. */
+	cursorUseHttp1ForAgent?: boolean;
 	/**
 	 * Optional rewrite of Cursor exec-channel tool results. May return a Promise.
 	 *

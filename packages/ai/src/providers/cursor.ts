@@ -158,9 +158,12 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
+import { buildCursorHeaders } from "./cursor/headers";
+import { type CursorHttp1Bridge, createCursorHttp1Bridge } from "./cursor/http1";
+import { type CursorTransportMode, resolveCursorTransportMode } from "./cursor/server-config";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
-export const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
+export { CURSOR_DEFAULT_CLIENT_VERSION as CURSOR_CLIENT_VERSION } from "./cursor/headers";
 
 const conversationStateCache = new Map<string, ConversationStateStructure>();
 const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
@@ -170,6 +173,12 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
+	clientVersion?: string;
+	useHttp1ForAgent?: boolean;
+}
+
+interface CursorChannel {
+	write(data: Uint8Array): void;
 }
 
 interface CursorLogEntry {
@@ -379,6 +388,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 		let h2Lease: H2Lease | null = null;
 		let h2Request: http2.ClientHttp2Stream | null = null;
+		let h1Bridge: CursorHttp1Bridge | null = null;
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 		const h2Completion = Promise.withResolvers<void>();
@@ -426,6 +436,22 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
+			const originalRequestId = crypto.randomUUID();
+			const requestId = crypto.randomUUID();
+			const preferHttp1 = options?.useHttp1ForAgent ?? false;
+			const { mode } = await resolveCursorTransportMode({
+				baseUrl,
+				apiKey,
+				provider: model.provider,
+				useHttp1ForAgent: preferHttp1,
+				clientVersion: options?.clientVersion,
+				originalRequestId,
+				signal: options?.signal,
+			}).catch((error: unknown): { mode: CursorTransportMode } => {
+				if (options?.signal?.aborted) throw new AIError.AbortError();
+				if (error instanceof AIError.CursorCredentialError || error instanceof AIError.AbortError) throw error;
+				return { mode: preferHttp1 ? "http1" : "http2" };
+			});
 			const requestPath = "/agent.v1.AgentService/Run";
 			const requestHeaders = {
 				":method": "POST",
@@ -433,15 +459,16 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				"content-type": "application/connect+proto",
 				"connect-protocol-version": "1",
 				te: "trailers",
-				authorization: `Bearer ${apiKey}`,
-				"x-ghost-mode": "true",
-				"x-cursor-client-version": CURSOR_CLIENT_VERSION,
-				"x-cursor-client-type": "cli",
-				"x-request-id": crypto.randomUUID(),
+				...buildCursorHeaders({
+					apiKey,
+					clientVersion: options?.clientVersion,
+					originalRequestId,
+					requestId,
+				}),
 			};
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
-						protocol: "http2",
+						protocol: mode === "http1" ? "http" : "http2",
 						method: "POST",
 						url: new URL(requestPath, baseUrl).toString(),
 						headers: requestHeaders,
@@ -450,9 +477,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				: undefined;
 
 			stream.push({ type: "start", partial: output });
-
-			h2Lease = await acquireH2Session(baseUrl, model.provider, options?.signal);
-			h2Request = await h2Lease.request(requestHeaders, { signal: options?.signal });
 
 			const frameReader = createConnectFrameReader();
 
@@ -496,152 +520,187 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				conversationStateCache.set(conversationId, checkpoint);
 			};
 
-			h2Request.on("response", headers => {
-				debugResponseLogPromise = debugSession?.openResponseLog(
-					`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
-					headers,
-				);
-				const status = Number(headers[":status"] ?? 0);
-				if (status >= 200 && status < 300) return;
-				const error =
-					status === 401 || status === 403
-						? new AIError.CursorCredentialError(`Cursor HTTP/2 request failed with status ${status}`, status)
-						: new AIError.ProviderHttpError(`Cursor HTTP/2 request failed with status ${status}`, status);
-				endStreamError = error;
-				settleH2(error);
-				h2Request?.close();
-			});
+			let channel: CursorChannel;
+			const dispatchServerMessage = (serverMessage: AgentServerMessage): void => {
+				const isTurnEnded =
+					serverMessage.message.case === "interactionUpdate" &&
+					serverMessage.message.value.message?.case === "turnEnded";
+				const dispatch = handleServerMessage(
+					serverMessage,
+					output,
+					stream,
+					state,
+					blobStore,
+					channel,
+					options?.execHandlers,
+					options?.onToolResult,
+					usageState,
+					requestContextTools,
+					onConversationCheckpoint,
+				).catch(error => {
+					dispatchError ??= error;
+					log("error", "handleServerMessage", { error: String(error) });
+				});
+				inFlightDispatches.add(dispatch);
+				void dispatch.finally(() => inFlightDispatches.delete(dispatch));
+				if (isTurnEnded) sawTurnEnded = true;
+			};
 
-			h2Request.on("data", (chunk: Buffer) => {
-				if (debugResponseLogPromise) {
-					void debugResponseLogPromise.then(log => {
-						log?.write(chunk);
+			if (mode === "http1") {
+				h1Bridge = await createCursorHttp1Bridge({
+					baseUrl,
+					apiKey,
+					provider: model.provider,
+					clientVersion: options?.clientVersion,
+					originalRequestId,
+					requestId,
+					requestBytes,
+					signal: options?.signal,
+				});
+				channel = {
+					write(data) {
+						if (data.length < 5) return;
+						const length = Buffer.from(data.buffer, data.byteOffset, data.byteLength).readUInt32BE(1);
+						// Record a failed send the same way a failed dispatch is recorded, so the
+						// drain at the end of the attempt rethrows it. Swallowing it here would let
+						// the stream end "normally" and hide a transient failure from the retry
+						// supervisor -- the defect shape findings #11-#13 exist to prevent.
+						const send = h1Bridge?.send(data.subarray(5, 5 + length)).catch((error: unknown) => {
+							dispatchError ??= error;
+							log("error", "cursorHttp1Send", { error: String(error) });
+						});
+						if (!send) return;
+						inFlightDispatches.add(send);
+						void send.finally(() => inFlightDispatches.delete(send));
+					},
+				};
+				for await (const serverMessage of h1Bridge.messages) dispatchServerMessage(serverMessage);
+				if (!sawTurnEnded) {
+					throw new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
+						kind: "incomplete-stream",
 					});
 				}
-				let frames: ConnectFrame[];
-				try {
-					frames = frameReader.push(chunk);
-				} catch (error) {
-					endStreamError = error instanceof Error ? error : new Error(String(error));
-					settleH2(endStreamError);
+			} else {
+				h2Lease = await acquireH2Session(baseUrl, model.provider, options?.signal);
+				h2Request = await h2Lease.request(requestHeaders, { signal: options?.signal });
+				channel = h2Request;
+
+				h2Request.on("response", headers => {
+					debugResponseLogPromise = debugSession?.openResponseLog(
+						`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
+						headers,
+					);
+					const status = Number(headers[":status"] ?? 0);
+					if (status >= 200 && status < 300) return;
+					const error =
+						status === 401 || status === 403
+							? new AIError.CursorCredentialError(`Cursor HTTP/2 request failed with status ${status}`, status)
+							: new AIError.ProviderHttpError(`Cursor HTTP/2 request failed with status ${status}`, status);
+					endStreamError = error;
+					settleH2(error);
 					h2Request?.close();
-					return;
-				}
+				});
 
-				for (const frame of frames) {
-					if (frame.endOfStream) {
-						const trailerError = readConnectTrailerError(frame.payload);
-						if (trailerError) {
-							endStreamError = cursorConnectError(trailerError.code, trailerError.message);
-							settleH2(endStreamError);
-							h2Request?.close();
-						}
-						continue;
-					}
-
-					try {
-						const serverMessage = fromBinary(AgentServerMessageSchema, frame.payload);
-						const isTurnEnded =
-							serverMessage.message.case === "interactionUpdate" &&
-							serverMessage.message.value.message?.case === "turnEnded";
-						// Dispatch is fire-and-forget so the socket keeps draining while a
-						// handler runs, but the promise is tracked: `done` must not be
-						// pushed while an exec handler is still resolving, or the Agent
-						// drains its Cursor result buffer before the handler reserved its
-						// entry and the call is left unpaired. Awaited after
-						// `h2Completion` below.
-						const dispatch = handleServerMessage(
-							serverMessage,
-							output,
-							stream,
-							state,
-							blobStore,
-							h2Request!,
-							options?.execHandlers,
-							options?.onToolResult,
-							usageState,
-							requestContextTools,
-							onConversationCheckpoint,
-						).catch(error => {
-							dispatchError ??= error;
-							log("error", "handleServerMessage", { error: String(error) });
+				h2Request.on("data", (chunk: Buffer) => {
+					if (debugResponseLogPromise) {
+						void debugResponseLogPromise.then(log => {
+							log?.write(chunk);
 						});
-						inFlightDispatches.add(dispatch);
-						void dispatch.finally(() => inFlightDispatches.delete(dispatch));
-
-						// Application completion is not protocol success; wait for a clean HTTP/2 end.
-						if (isTurnEnded) {
-							sawTurnEnded = true;
-						}
+					}
+					let frames: ConnectFrame[];
+					try {
+						frames = frameReader.push(chunk);
 					} catch (error) {
-						log("error", "parseServerMessage", { error: String(error) });
 						endStreamError = error instanceof Error ? error : new Error(String(error));
 						settleH2(endStreamError);
 						h2Request?.close();
 						return;
 					}
-				}
-			});
 
-			const sendHeartbeat = () => {
-				if (!h2Request || h2Request.closed) {
-					return;
-				}
-				const heartbeatMessage = create(AgentClientMessageSchema, {
-					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
+					for (const frame of frames) {
+						if (frame.endOfStream) {
+							const trailerError = readConnectTrailerError(frame.payload);
+							if (trailerError) {
+								endStreamError = cursorConnectError(trailerError.code, trailerError.message);
+								settleH2(endStreamError);
+								h2Request?.close();
+							}
+							continue;
+						}
+
+						try {
+							const serverMessage = fromBinary(AgentServerMessageSchema, frame.payload);
+							dispatchServerMessage(serverMessage);
+						} catch (error) {
+							log("error", "parseServerMessage", { error: String(error) });
+							endStreamError = error instanceof Error ? error : new Error(String(error));
+							settleH2(endStreamError);
+							h2Request?.close();
+							return;
+						}
+					}
 				});
-				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				h2Request.write(encodeConnectFrame(heartbeatBytes));
-			};
 
-			const closeDebugLog = async (): Promise<void> => {
-				const log = await debugResponseLogPromise;
-				await log?.close();
-			};
-
-			h2Request.on("trailers", trailers => {
-				const status = Number(trailers["grpc-status"] ?? 0);
-				if (status === 0 || endStreamError) return;
-				const message = decodeURIComponent(String(trailers["grpc-message"] || ""));
-				endStreamError =
-					status === 16
-						? cursorConnectError("unauthenticated", message)
-						: status === 7
-							? cursorConnectError("permission_denied", message)
-							: new AIError.ProviderResponseError(`gRPC error ${status}: ${message}`, { kind: "envelope" });
-			});
-
-			h2Request.on("end", () => {
-				void closeDebugLog()
-					.then(() => settleH2())
-					.catch(error => settleH2(error));
-			});
-
-			h2Request.on("error", error => {
-				void closeDebugLog().finally(() => settleH2(error));
-			});
-			h2Request.on("close", () => {
-				if (h2Settled) return;
-				const error =
-					endStreamError ??
-					new AIError.ProviderResponseError("Cursor HTTP/2 stream closed before completion", {
-						kind: "incomplete-stream",
+				const sendHeartbeat = () => {
+					if (!h2Request || h2Request.closed) {
+						return;
+					}
+					const heartbeatMessage = create(AgentClientMessageSchema, {
+						message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
 					});
-				void closeDebugLog().finally(() => settleH2(error));
-			});
+					const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
+					h2Request.write(encodeConnectFrame(heartbeatBytes));
+				};
 
-			if (options?.signal) {
-				options.signal.addEventListener("abort", () => {
-					h2Request?.close();
-					void closeDebugLog().finally(() => {
-						settleH2(new AIError.AbortError());
-					});
+				const closeDebugLog = async (): Promise<void> => {
+					const log = await debugResponseLogPromise;
+					await log?.close();
+				};
+
+				h2Request.on("trailers", trailers => {
+					const status = Number(trailers["grpc-status"] ?? 0);
+					if (status === 0 || endStreamError) return;
+					const message = decodeURIComponent(String(trailers["grpc-message"] || ""));
+					endStreamError =
+						status === 16
+							? cursorConnectError("unauthenticated", message)
+							: status === 7
+								? cursorConnectError("permission_denied", message)
+								: new AIError.ProviderResponseError(`gRPC error ${status}: ${message}`, { kind: "envelope" });
 				});
+
+				h2Request.on("end", () => {
+					void closeDebugLog()
+						.then(() => settleH2())
+						.catch(error => settleH2(error));
+				});
+
+				h2Request.on("error", error => {
+					void closeDebugLog().finally(() => settleH2(error));
+				});
+				h2Request.on("close", () => {
+					if (h2Settled) return;
+					const error =
+						endStreamError ??
+						new AIError.ProviderResponseError("Cursor HTTP/2 stream closed before completion", {
+							kind: "incomplete-stream",
+						});
+					void closeDebugLog().finally(() => settleH2(error));
+				});
+
+				if (options?.signal) {
+					options.signal.addEventListener("abort", () => {
+						h2Request?.close();
+						void closeDebugLog().finally(() => {
+							settleH2(new AIError.AbortError());
+						});
+					});
+				}
+
+				h2Request.write(encodeConnectFrame(requestBytes));
+				heartbeatTimer = setInterval(sendHeartbeat, 5000);
+				await h2Completion.promise;
 			}
-
-			h2Request.write(encodeConnectFrame(requestBytes));
-			heartbeatTimer = setInterval(sendHeartbeat, 5000);
-			await h2Completion.promise;
 			// The transport is done, but a handler decoded from the last chunk may
 			// still be running: exec handlers and `onToolResult` transformers are
 			// async. Pushing `done` now would let the Agent drain its Cursor result
@@ -705,6 +764,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				clearInterval(heartbeatTimer);
 				heartbeatTimer = null;
 			}
+			if (h1Bridge) {
+				await h1Bridge.close("dispose").catch(() => undefined);
+				h1Bridge = null;
+			}
 			h2Request?.close();
 			h2Lease?.release();
 		}
@@ -757,7 +820,7 @@ export async function handleServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	blobStore: Map<string, Uint8Array>,
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorChannel,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 	usageState: UsageState,
@@ -797,7 +860,7 @@ export async function handleServerMessage(
 function handleKvServerMessage(
 	kvMsg: KvServerMessage,
 	blobStore: Map<string, Uint8Array>,
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorChannel,
 ): void {
 	const kvCase = kvMsg.message.case;
 
@@ -847,11 +910,7 @@ function handleKvServerMessage(
 	}
 }
 
-function sendShellStreamEvent(
-	h2Request: http2.ClientHttp2Stream,
-	execMsg: ExecServerMessage,
-	event: ShellStream["event"],
-): void {
+function sendShellStreamEvent(h2Request: CursorChannel, execMsg: ExecServerMessage, event: ShellStream["event"]): void {
 	sendExecClientMessage(h2Request, execMsg, "shellStream", create(ShellStreamSchema, { event }));
 }
 
@@ -883,7 +942,7 @@ function sanitizeShellExecResult(execResult: ShellResult): ShellResult {
 async function handleShellStreamArgs(
 	args: ShellArgs,
 	execMsg: ExecServerMessage,
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorChannel,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 ): Promise<void> {
@@ -1032,7 +1091,7 @@ async function handleShellStreamArgs(
 }
 
 function sendShellStreamExitFromResult(
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorChannel,
 	execMsg: ExecServerMessage,
 	execResult: ShellResult,
 	sendBufferedOutput: boolean,
@@ -1141,7 +1200,7 @@ function sendShellStreamExitFromResult(
 
 async function handleExecServerMessage(
 	execMsg: ExecServerMessage,
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorChannel,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 	requestContextTools: McpToolDefinition[],
@@ -1466,7 +1525,7 @@ async function handleExecServerMessage(
 }
 
 function sendExecClientMessage<T>(
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorChannel,
 	execMsg: ExecServerMessage,
 	messageCase: ExecClientMessage["message"]["case"],
 	value: T,
@@ -1490,7 +1549,7 @@ function sendExecClientMessage<T>(
 	log("execClientMessage", messageCase, value);
 }
 
-function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: ExecServerMessage): void {
+function sendExecClientStreamClose(h2Request: CursorChannel, execMsg: ExecServerMessage): void {
 	const closeMessage = create(ExecClientControlMessageSchema, {
 		message: {
 			case: "streamClose",

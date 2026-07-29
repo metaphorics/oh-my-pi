@@ -7,7 +7,7 @@ import type { Model, ModelSpec } from "../types";
 import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-gen/agent_pb";
 
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
-const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";
+export const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";
 const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;

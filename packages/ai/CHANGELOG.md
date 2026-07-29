@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added a provider-neutral HTTP/1 Connect bridge and Cursor fallback with lifecycle-bound cancellation, poll deduplication, and credential-error normalization.
+
 ### Changed
 
 - Extracted Cursor's HTTP/2 pooling, lifecycle, transient-error classification, and Connect framing into a provider-neutral transport subsystem.

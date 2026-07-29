@@ -1851,6 +1851,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
+				useHttp1ForAgent: options?.cursorUseHttp1ForAgent,
 			});
 		}
 
