@@ -68,7 +68,7 @@ describe("streamDevin frame length cap", () => {
 		const result = await stream.result();
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Devin Connect frame length");
+		expect(result.errorMessage).toContain("Devin Connect frame payload");
 		expect(result.errorMessage).toContain("16777216");
 		// Fewer than 2 MiB should ever flow through: the reader must reject the
 		// frame the moment it decodes the length prefix, not after a payload

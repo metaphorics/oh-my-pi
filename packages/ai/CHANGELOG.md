@@ -9,6 +9,7 @@
 ### Changed
 
 - Extracted Cursor's HTTP/2 pooling, lifecycle, transient-error classification, and Connect framing into a provider-neutral transport subsystem.
+- Moved Devin chat streaming onto the shared pooled HTTP/2 and Connect transport, with lifecycle-bound cancellation and HTTP/1 fallback.
 
 
 ## [17.1.8] - 2026-07-28
