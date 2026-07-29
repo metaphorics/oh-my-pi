@@ -78,6 +78,27 @@ describe("shared Connect framing", () => {
 		expect(() => reader.push(frame.subarray(0, 5))).toThrow("exceeds 8 bytes");
 	});
 
+	it("rejects a clean close with a truncated Connect header", () => {
+		const reader = createConnectFrameReader();
+		expect(reader.push(new Uint8Array([0, 0, 0]))).toEqual([]);
+		expect(() => reader.finish()).toThrow("incomplete frame header (3 of 5 bytes)");
+	});
+
+	it("rejects a clean close with a truncated Connect payload", () => {
+		const reader = createConnectFrameReader();
+		const frame = encodeConnectFrame(new Uint8Array([1, 2, 3]));
+		expect(reader.push(frame.subarray(0, -1))).toEqual([]);
+		expect(() => reader.finish()).toThrow("incomplete frame payload (2 of 3 bytes)");
+	});
+
+	it("accepts a complete terminal frame at a clean close", () => {
+		const reader = createConnectFrameReader();
+		const frames = reader.push(encodeConnectFrame(new Uint8Array(0), CONNECT_END_STREAM_FLAG));
+		expect(frames).toHaveLength(1);
+		expect(frames[0]?.endOfStream).toBe(true);
+		expect(() => reader.finish()).not.toThrow();
+	});
+
 	it("extracts structured trailer errors and ignores successful trailers", () => {
 		const error = new TextEncoder().encode(
 			JSON.stringify({ error: { code: "permission_denied", message: "account unavailable" } }),

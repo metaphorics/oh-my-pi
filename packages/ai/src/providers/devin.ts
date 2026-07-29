@@ -433,6 +433,15 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				}
 			}
 
+			try {
+				frameReader.finish();
+			} catch (error) {
+				throw new AIError.ProviderResponseError(`Devin ${error instanceof Error ? error.message : String(error)}`, {
+					provider: model.provider,
+					kind: "envelope",
+				});
+			}
+
 			if (h2Request && !h2Request.readableEnded) {
 				throw new AIError.ProviderResponseError("Devin HTTP/2 stream closed before the response ended", {
 					provider: model.provider,

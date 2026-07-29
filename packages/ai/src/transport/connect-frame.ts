@@ -21,6 +21,7 @@ export interface ConnectFrame {
 
 export function createConnectFrameReader(options?: { maxPayloadBytes?: number }): {
 	push(chunk: Uint8Array): ConnectFrame[];
+	finish(): void;
 } {
 	const maxPayloadBytes = options?.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
 	if (!Number.isSafeInteger(maxPayloadBytes) || maxPayloadBytes < 0) {
@@ -67,6 +68,21 @@ export function createConnectFrameReader(options?: { maxPayloadBytes?: number })
 			if (offset === pending.byteLength) pending = new Uint8Array(0);
 			else if (offset > 0) pending = pending.subarray(offset);
 			return frames;
+		},
+		finish(): void {
+			if (pending.byteLength === 0) return;
+			if (pending.byteLength < CONNECT_HEADER_BYTES) {
+				throw new RangeError(
+					`Connect stream ended with an incomplete frame header (${pending.byteLength} of ${CONNECT_HEADER_BYTES} bytes)`,
+				);
+			}
+			const payloadLength = new DataView(pending.buffer, pending.byteOffset, CONNECT_HEADER_BYTES).getUint32(
+				1,
+				false,
+			);
+			throw new RangeError(
+				`Connect stream ended with an incomplete frame payload (${pending.byteLength - CONNECT_HEADER_BYTES} of ${payloadLength} bytes)`,
+			);
 		},
 	};
 }

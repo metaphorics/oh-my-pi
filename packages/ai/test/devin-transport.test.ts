@@ -79,9 +79,10 @@ describe("streamDevin shared HTTP/2 transport", () => {
 			expect(headers.authorization).toBe("Basic devin-session-token$token");
 			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 			const frame = responseFrame("split frame");
+			const terminal = encodeConnectFrame(new Uint8Array(0), CONNECT_END_STREAM_FLAG);
 			await writeChunk(stream, frame.subarray(0, 2));
 			await writeChunk(stream, frame.subarray(2, 7));
-			stream.end(frame.subarray(7));
+			stream.end(Buffer.concat([frame.subarray(7), terminal]));
 		};
 
 		const result = await streamDevin(model(), context, {
@@ -90,6 +91,18 @@ describe("streamDevin shared HTTP/2 transport", () => {
 		}).result();
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toContainEqual({ type: "text", text: "split frame" });
+	});
+
+	it("fails a clean HTTP/2 close with a truncated Connect header", async () => {
+		respond = stream => {
+			stream.respond({ ":status": 200 });
+			stream.end(new Uint8Array([0, 0, 0]));
+		};
+
+		const result = await streamDevin(model(), context, { apiKey: "token" }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("incomplete frame header (3 of 5 bytes)");
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
 	});
 
 	it("rejects an oversized Connect frame at the shared cap", async () => {
@@ -149,6 +162,7 @@ describe("streamDevin shared HTTP/2 transport", () => {
 		expect(result.errorStatus).toBe(403);
 		expect(result.errorMessage).toContain("Devin API error 403: permission denied");
 		expect(AIError.is(result.errorId, AIError.Flag.AuthFailed)).toBe(true);
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
 		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(false);
 	});
 });

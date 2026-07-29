@@ -76,6 +76,11 @@ async function runTrailerError(context: Context, code: string, message: string, 
 	return streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
 }
 
+async function runHttpError(context: Context, status: number, statusText: string, body: string) {
+	const fetchImpl: FetchImpl = async () => new Response(body, { status, statusText });
+	return streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
+}
+
 describe("streamDevin large request recovery", () => {
 	it("classifies an opaque invalid_argument on cumulative large read output as context overflow", async () => {
 		const result = await runTrailerError(
@@ -87,6 +92,44 @@ describe("streamDevin large request recovery", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("trace ID: large-request");
 		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+	});
+
+	it("classifies an explicit current-protocol Connect oversized-request trailer without relying on history size", async () => {
+		const result = await runTrailerError(
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			"resource_exhausted",
+			"request_too_large: serialized prompt exceeds the backend request budget",
+		);
+
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.isContextOverflow(result)).toBe(true);
+	});
+
+	it("classifies a current-protocol HTTP 413 oversized request", async () => {
+		const result = await runHttpError(
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			413,
+			"Payload Too Large",
+			"request_too_large",
+		);
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(413);
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.isContextOverflow(result)).toBe(true);
+	});
+
+	it("keeps a non-overflow current-protocol trailer out of auto-compaction", async () => {
+		const result = await runTrailerError(
+			largeReadContext,
+			"permission_denied",
+			"the selected model is unavailable to this account",
+		);
+
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
+		expect(AIError.isContextOverflow(result)).toBe(false);
 	});
 
 	it("keeps the same opaque trailer transient for a small request", async () => {

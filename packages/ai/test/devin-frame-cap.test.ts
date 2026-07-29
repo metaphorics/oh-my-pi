@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -34,6 +35,13 @@ function corruptFrameHeader(advertisedLen: number): Uint8Array {
 	view.setUint8(0, 0);
 	view.setUint32(1, advertisedLen, false);
 	return out;
+}
+
+function connectFrame(payload: Uint8Array): Uint8Array {
+	const frame = new Uint8Array(5 + payload.byteLength);
+	new DataView(frame.buffer).setUint32(1, payload.byteLength, false);
+	frame.set(payload, 5);
+	return frame;
 }
 
 describe("streamDevin frame length cap", () => {
@@ -104,5 +112,24 @@ describe("streamDevin frame length cap", () => {
 		expect(errorEvent?.error.stopReason).toBe("error");
 		expect(errorEvent?.error.errorMessage).toContain("67108864");
 		expect(errorEvent?.error.errorMessage).toContain("16777216");
+	});
+
+	it("fails a clean explicit-fetch close with a truncated Connect payload", async () => {
+		const frame = connectFrame(new Uint8Array([1, 2, 3]));
+		const fetchImpl: FetchImpl = async () =>
+			new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(frame.subarray(0, -1));
+						controller.close();
+					},
+				}),
+				{ status: 200 },
+			);
+
+		const result = await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("incomplete frame payload (2 of 3 bytes)");
+		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(false);
 	});
 });
