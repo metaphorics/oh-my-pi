@@ -321,6 +321,7 @@ export interface UsageCredential {
 	expiresAt?: number;
 	accountId?: string;
 	projectId?: string;
+	profileArn?: string;
 	email?: string;
 	/** Organization/workspace the credential is scoped to (see OAuthCredentials.orgId). */
 	orgId?: string;

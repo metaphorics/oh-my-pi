@@ -928,6 +928,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			accountId: refreshed.accountId,
 			email: refreshed.email,
 			projectId: refreshed.projectId,
+			profileArn: refreshed.profileArn,
 			enterpriseUrl: refreshed.enterpriseUrl,
 		};
 	}

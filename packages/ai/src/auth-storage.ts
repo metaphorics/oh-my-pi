@@ -54,6 +54,7 @@ import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
 import { kimiUsageProvider } from "./usage/kimi";
+import { kiroUsageProvider } from "./usage/kiro";
 import { minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
@@ -273,6 +274,7 @@ export type CompletionProbeCredential =
 			expiresAt?: number;
 			accountId?: string;
 			projectId?: string;
+			profileArn?: string;
 			email?: string;
 			enterpriseUrl?: string;
 			apiEndpoint?: string;
@@ -656,6 +658,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	opencodeGoUsageProvider,
 	githubCopilotUsageProvider,
 	cursorUsageProvider,
+	kiroUsageProvider,
 	syntheticUsageProvider,
 	xaiOauthUsageProvider,
 ];
@@ -826,6 +829,7 @@ export interface OAuthAccess {
 	accountId?: string;
 	email?: string;
 	projectId?: string;
+	profileArn?: string;
 	enterpriseUrl?: string;
 	apiEndpoint?: string;
 	/** Organization/workspace the credential is scoped to (Anthropic/ChatGPT multi-subscription). */
@@ -851,6 +855,7 @@ export interface OAuthAccessFailure {
 	accountId?: string;
 	email?: string;
 	projectId?: string;
+	profileArn?: string;
 	enterpriseUrl?: string;
 	apiEndpoint?: string;
 	/** Organization/workspace the credential is scoped to (Anthropic/ChatGPT multi-subscription). */
@@ -2799,6 +2804,7 @@ export class AuthStorage {
 			expiresAt: credential.expires,
 			accountId: credential.accountId,
 			projectId: credential.projectId,
+			profileArn: credential.profileArn,
 			email: credential.email,
 			orgId: credential.orgId,
 			orgName: credential.orgName,
@@ -2817,13 +2823,15 @@ export class AuthStorage {
 		if (orgId) parts.push(`org:${orgId}`);
 		const projectId = credential.projectId?.trim();
 		if (projectId) parts.push(`project:${projectId}`);
+		const profileArn = credential.profileArn?.trim();
+		if (profileArn) parts.push(`profile:${profileArn}`);
 		const enterpriseUrl = credential.enterpriseUrl?.trim().toLowerCase();
 		if (enterpriseUrl) parts.push(`enterprise:${enterpriseUrl}`);
 		// Only fall back to a secret-derived key when a stable account identifier is
 		// unavailable. Including the token hash when accountId/email/orgId are present
 		// causes cache misses on every OAuth refresh — usage data is per-account (or
 		// per-org for org-only anthropic rows), not per-token.
-		const hasStableIdentifier = Boolean(accountId || email || orgId);
+		const hasStableIdentifier = Boolean(accountId || email || orgId || profileArn);
 		if (!hasStableIdentifier) {
 			const secret = credential.apiKey?.trim() || credential.refreshToken?.trim() || credential.accessToken?.trim();
 			if (secret) {
@@ -2883,6 +2891,7 @@ export class AuthStorage {
 			expires: credential.expiresAt,
 			accountId: credential.accountId,
 			projectId: credential.projectId,
+			profileArn: credential.profileArn,
 			email: credential.email,
 			orgId: credential.orgId,
 			orgName: credential.orgName,
@@ -2909,6 +2918,7 @@ export class AuthStorage {
 			expiresAt: credential.expiresAt,
 			accountId: credential.accountId,
 			projectId: credential.projectId,
+			profileArn: credential.profileArn,
 			email: credential.email,
 			enterpriseUrl: credential.enterpriseUrl,
 			apiEndpoint: credential.apiEndpoint,
@@ -2923,6 +2933,7 @@ export class AuthStorage {
 			expiresAt: refreshed.expires,
 			accountId: refreshed.accountId ?? credential.accountId,
 			projectId: refreshed.projectId ?? credential.projectId,
+			profileArn: refreshed.profileArn ?? credential.profileArn,
 			email: refreshed.email ?? credential.email,
 			enterpriseUrl: refreshed.enterpriseUrl ?? credential.enterpriseUrl,
 			apiEndpoint: refreshed.apiEndpoint ?? credential.apiEndpoint,
@@ -4999,6 +5010,7 @@ export class AuthStorage {
 				accountId: result.newCredentials.accountId ?? selection.credential.accountId,
 				email: result.newCredentials.email ?? selection.credential.email,
 				projectId: result.newCredentials.projectId ?? selection.credential.projectId,
+				profileArn: result.newCredentials.profileArn ?? selection.credential.profileArn,
 				enterpriseUrl: result.newCredentials.enterpriseUrl ?? selection.credential.enterpriseUrl,
 				apiEndpoint: result.newCredentials.apiEndpoint ?? selection.credential.apiEndpoint,
 				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
@@ -5270,6 +5282,7 @@ export class AuthStorage {
 			accountId: credential.accountId,
 			email: credential.email,
 			projectId: credential.projectId,
+			profileArn: credential.profileArn,
 			enterpriseUrl: credential.enterpriseUrl,
 			apiEndpoint: credential.apiEndpoint,
 			orgId: credential.orgId,

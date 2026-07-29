@@ -33,6 +33,7 @@ import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { isKimiModel, streamKimi } from "./providers/kimi";
+import type { KiroOptions } from "./providers/kiro";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
@@ -53,6 +54,7 @@ import {
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
+	streamKiro,
 	streamOllama,
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
@@ -898,6 +900,8 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(model as Model<"devin-agent">, context, providerOptions as DevinOptions);
+		case "kiro-agent":
+			return streamKiro(model as Model<"kiro-agent">, context, providerOptions as KiroOptions);
 
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
@@ -1872,6 +1876,9 @@ function mapOptionsForApi<TApi extends Api>(
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
 		}
+		case "kiro-agent":
+			return castApi<"kiro-agent">({ ...base, cwd: options?.cwd });
+
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);
 	}

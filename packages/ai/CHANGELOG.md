@@ -5,6 +5,7 @@
 ### Added
 
 - Added a provider-neutral HTTP/1 Connect bridge and Cursor fallback with lifecycle-bound cancellation, poll deduplication, and credential-error normalization.
+- Added the Kiro provider with pooled HTTP/2 transport, AWS EventStream decoding, device login, tool streaming, and subscription usage reporting.
 
 ### Changed
 

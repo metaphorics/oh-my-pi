@@ -5,6 +5,7 @@
 ### Added
 
 - Added Cursor Bidi and server-configuration protocol descriptors used by HTTP/1 transport fallback and mode discovery.
+- Added dynamic discovery for the account-scoped Kiro model catalog.
 
 ## [17.1.8] - 2026-07-28
 
