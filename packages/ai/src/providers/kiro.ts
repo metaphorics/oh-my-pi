@@ -96,6 +96,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 		let thinkingBlock: ThinkingContent | undefined;
 		const toolBlocks = new Map<string, ToolCall>();
 		const toolPartialJson = new Map<string, string>();
+		let sawEndTurn = false;
 		let h2Lease: H2Lease | undefined;
 		let h2Request: http2.ClientHttp2Stream | undefined;
 		let completed = false;
@@ -240,7 +241,7 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 						break;
 					}
 					case "metadataEvent":
-						output.stopReason = payload.stopReason === "END_TURN" ? "stop" : "error";
+						if (payload.stopReason === "END_TURN") sawEndTurn = true;
 						break;
 					default:
 						break;
@@ -272,12 +273,13 @@ export const streamKiro: StreamFunction<"kiro-agent"> = (
 					partial: output,
 				});
 			}
-			if (toolBlocks.size > 0) output.stopReason = "toolUse";
-			if (output.stopReason === "error") {
+			if (!sawEndTurn) {
 				throw new AIError.ProviderResponseError("Kiro ended the response without END_TURN", {
 					provider: model.provider,
+					kind: "incomplete-stream",
 				});
 			}
+			output.stopReason = toolBlocks.size > 0 ? "toolUse" : "stop";
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 			calculateCost(model, output.usage);
