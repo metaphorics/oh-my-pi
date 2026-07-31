@@ -1,5 +1,12 @@
-import { describe, expect, it } from "bun:test";
-import { addKeyAliases, canonicalKeyId, KeybindingsManager, parseKey, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
+import { afterEach, describe, expect, it } from "bun:test";
+import {
+	addKeyAliases,
+	canonicalKeyId,
+	KeybindingsManager,
+	parseKey,
+	setSuperMirrorsCtrl,
+	TUI_KEYBINDINGS,
+} from "@oh-my-pi/pi-tui";
 
 describe("KeybindingsManager", () => {
 	it("does not evict selector confirm when input submit is rebound", () => {
@@ -72,5 +79,43 @@ describe("KeybindingsManager", () => {
 			expect(aliases.has(canonicalKeyId(parsed))).toBe(true);
 			expect(keybindings.matches(input, "tui.input.copy")).toBe(true);
 		}
+	});
+});
+
+describe("Command mirrors Ctrl on macOS (superMirrorsCtrl)", () => {
+	// Managers cache their match set at construction via addKeyAliases, so the flag
+	// MUST be flipped before the manager is built — constructing first and flipping
+	// after silently tests nothing.
+	afterEach(() => {
+		setSuperMirrorsCtrl(process.platform === "darwin");
+	});
+
+	it("answers the Command wire form when a ctrl binding is mirrored", () => {
+		setSuperMirrorsCtrl(true);
+		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.input.copy": "ctrl+up",
+		});
+
+		// "\x1b[1;9A" is the Command+Up wire form; it parses to super+up.
+		expect(keybindings.matches("\x1b[1;9A", "tui.input.copy")).toBe(true);
+	});
+
+	it("does not answer the Command wire form when the mirror is disabled", () => {
+		setSuperMirrorsCtrl(false);
+		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.input.copy": "ctrl+up",
+		});
+
+		expect(keybindings.matches("\x1b[1;9A", "tui.input.copy")).toBe(false);
+	});
+
+	it("does not mirror non-Ctrl bindings", () => {
+		setSuperMirrorsCtrl(true);
+		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.input.copy": "alt+up",
+		});
+
+		// A binding of alt+up has no ctrl+ twin, so Command+Up must not match it.
+		expect(keybindings.matches("\x1b[1;9A", "tui.input.copy")).toBe(false);
 	});
 });

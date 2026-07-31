@@ -214,11 +214,24 @@ export function canonicalKeyId(key: string): string {
 	return `${modifiers.join("+")}+${base}`;
 }
 
+let superMirrorsCtrl = process.platform === "darwin";
+
+/** Test seam, mirroring `setKittyProtocolActive` in `keys.ts`. Managers cache their
+ *  match sets at construction, so flip this BEFORE constructing a KeybindingsManager. */
+export function setSuperMirrorsCtrl(enabled: boolean): void {
+	superMirrorsCtrl = enabled;
+}
+
 export function addKeyAliases(keys: Set<string>, key: KeyId): void {
 	const canonical = canonicalKeyId(key);
 	keys.add(canonical);
 	if (SHIFTED_SYMBOL_KEYS.has(canonical)) {
 		keys.add(`shift+${canonical}`);
+	}
+	// macOS: Command mirrors Ctrl. Expand bindings rather than rewriting input —
+	// `super+alt+backspace` and friends are Ghostty's Option wire forms, not Command.
+	if (superMirrorsCtrl && canonical.startsWith("ctrl+")) {
+		keys.add(canonicalKeyId(`super+${canonical.slice("ctrl+".length)}`));
 	}
 }
 
