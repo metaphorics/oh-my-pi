@@ -33,6 +33,7 @@ interface AppKeybindings {
 	"app.message.followUp": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
+	"app.message.dequeueFollowUp": true;
 	"app.clipboard.pasteImage": true;
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
@@ -142,7 +143,11 @@ export const KEYBINDINGS = {
 		// Shift+Up is listed alongside Alt+Up because macOS Terminal.app consumes Option
 		// for character composition, leaving Alt+Up unreachable there.
 		defaultKeys: ["alt+up", "shift+up"],
-		description: "Dequeue message",
+		description: "Restore steering messages to the editor",
+	},
+	"app.message.dequeueFollowUp": {
+		defaultKeys: "ctrl+shift+up",
+		description: "Restore follow-up messages to the editor",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: getDefaultPasteImageKeys(),

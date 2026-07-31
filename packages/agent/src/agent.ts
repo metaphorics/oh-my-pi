@@ -915,7 +915,7 @@ export class Agent {
 		this.#state.messages = ms.slice();
 	}
 
-	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
+	replaceQueues(steering: readonly AgentMessage[], followUp: readonly AgentMessage[]) {
 		this.#steeringQueue = steering.slice();
 		this.#followUpQueue = followUp.slice();
 		this.#notifySteeringWaiters();

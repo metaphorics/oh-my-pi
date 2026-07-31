@@ -5752,19 +5752,25 @@ export class AgentSession {
 	 *  kept (abort()'s #extractQueuedAdvisorCards preserves them as visible advice) and every other
 	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
 	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
-	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
-	clearQueue(options?: { forInterrupt?: boolean }): {
+	 *  fires while agent.hasQueuedMessages()). A plain dequeue preserves those non-user steers.
+	 *  `only` restricts the drain to one queue; the other is returned empty and left untouched. */
+	clearQueue(options?: { forInterrupt?: boolean; only?: "steering" | "followUp" }): {
 		steering: RestoredQueuedMessage[];
 		followUp: RestoredQueuedMessage[];
 	} {
 		const steeringAll = this.agent.peekSteeringQueue();
 		const followUpAll = this.agent.peekFollowUpQueue();
-		const steering = steeringAll.filter(isUserQueuedMessage).map(toRestoredQueuedMessage);
-		const followUp = followUpAll.filter(isUserQueuedMessage).map(toRestoredQueuedMessage);
+		const takeSteering = options?.only !== "followUp";
+		const takeFollowUp = options?.only !== "steering";
+		const steering = takeSteering ? steeringAll.filter(isUserQueuedMessage).map(toRestoredQueuedMessage) : [];
+		const followUp = takeFollowUp ? followUpAll.filter(isUserQueuedMessage).map(toRestoredQueuedMessage) : [];
 		const keep: (m: AgentMessage) => boolean = options?.forInterrupt
 			? isAdvisorCard
 			: m => !isUserQueuedMessage(m) && !isHiddenUserCompanion(m);
-		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
+		this.agent.replaceQueues(
+			takeSteering ? steeringAll.filter(keep) : steeringAll,
+			takeFollowUp ? followUpAll.filter(keep) : followUpAll,
+		);
 		return { steering, followUp };
 	}
 

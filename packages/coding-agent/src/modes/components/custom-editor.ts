@@ -35,6 +35,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.editor.external"
 	| "app.history.search"
 	| "app.message.dequeue"
+	| "app.message.dequeueFollowUp"
 	| "app.retry"
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
@@ -57,6 +58,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.editor.external": ["ctrl+g"],
 	"app.history.search": ["ctrl+r"],
 	"app.message.dequeue": ["alt+up", "shift+up"],
+	"app.message.dequeueFollowUp": ["ctrl+shift+up"],
 	"app.retry": ["alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
@@ -563,8 +565,10 @@ export class CustomEditor extends Editor {
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
-	/** Called when the configured dequeue shortcut is pressed. */
+	/** Called when the configured steering-dequeue shortcut is pressed. */
 	onDequeue?: () => void;
+	/** Called when the configured follow-up dequeue shortcut is pressed. */
+	onDequeueFollowUp?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
 	onRetry?: () => void;
 	/** Called when Caps Lock is pressed. */
@@ -954,9 +958,14 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured dequeue shortcut (restore queued message to editor)
+			// Intercept configured dequeue shortcuts (restore queued messages to editor)
 			if (this.#matchesAction(canonical, "app.message.dequeue") && this.onDequeue) {
 				this.onDequeue();
+				return;
+			}
+
+			if (this.#matchesAction(canonical, "app.message.dequeueFollowUp") && this.onDequeueFollowUp) {
+				this.onDequeueFollowUp();
 				return;
 			}
 

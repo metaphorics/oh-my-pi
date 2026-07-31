@@ -774,13 +774,19 @@ export class UiHelpers {
 		}
 
 		const groups = [
-			{ label: "Steering", messages: steeringMessages },
-			{ label: "After yield", messages: followUpMessages },
+			{ label: "Steering", messages: steeringMessages, action: "app.message.dequeue" as const },
+			{ label: "After yield", messages: followUpMessages, action: "app.message.dequeueFollowUp" as const },
 		].filter(group => group.messages.length > 0);
 		if (groups.length > 0) {
 			this.ctx.pendingMessagesContainer.addChild(new Spacer(1));
 			for (const group of groups) {
-				const heading = theme.fg("muted", `${group.label}${theme.sep.dot}${group.messages.length}`);
+				// The key rides its own group so the bar never advertises a shortcut
+				// that would answer "no messages to restore".
+				const key = this.ctx.keybindings.getDisplayString(group.action);
+				const label = `${group.label}${theme.sep.dot}${group.messages.length}`;
+				const heading = key
+					? `${theme.fg("muted", label)}${theme.fg("dim", `  ${key} to edit`)}`
+					: theme.fg("muted", label);
 				this.ctx.pendingMessagesContainer.addChild(new TruncatedText(heading, 1, 0));
 				for (let index = 0; index < group.messages.length; index++) {
 					const message = replaceTabs(group.messages[index] ?? "").replace(/\r?\n/g, " ↵ ");
@@ -788,9 +794,6 @@ export class UiHelpers {
 					this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
 				}
 			}
-			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || "Alt+Up";
-			const hintText = theme.fg("dim", `  ${theme.tree.hook} ${dequeueKey} to edit`);
-			this.ctx.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 		this.ctx.ui.requestComponentRender(this.ctx.pendingMessagesContainer);
 	}

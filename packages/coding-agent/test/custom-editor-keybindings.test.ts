@@ -54,4 +54,9 @@ describe("shipped dequeue defaults", () => {
 		expect(keys).toContain("alt+up");
 		expect(keys).toContain("shift+up");
 	});
+
+	it("binds ctrl+shift+up to the follow-up dequeue", () => {
+		const keybindings = KeybindingsManager.inMemory();
+		expect(keybindings.getKeys("app.message.dequeueFollowUp")).toEqual(["ctrl+shift+up"]);
+	});
 });

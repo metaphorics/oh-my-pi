@@ -459,6 +459,11 @@ export class InputController {
 		this.ctx.editor.onExpandTools = () => this.toggleToolOutputExpansion();
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
+		this.ctx.editor.setActionKeys(
+			"app.message.dequeueFollowUp",
+			this.ctx.keybindings.getKeys("app.message.dequeueFollowUp"),
+		);
+		this.ctx.editor.onDequeueFollowUp = () => this.handleDequeue("followUp");
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => void this.handleRetry();
 		this.ctx.editor.clearCustomKeyHandlers();
@@ -1091,12 +1096,13 @@ export class InputController {
 		}
 	}
 
-	handleDequeue(): void {
-		const restored = this.restoreQueuedMessagesToEditor();
+	handleDequeue(queue: "steering" | "followUp" = "steering"): void {
+		const restored = this.restoreQueuedMessagesToEditor({ queue });
+		const noun = queue === "steering" ? "steering" : "follow-up";
 		if (restored === 0) {
-			this.ctx.showStatus("No queued messages to restore");
+			this.ctx.showStatus(`No ${noun} messages to restore`);
 		} else {
-			this.ctx.showStatus(`Restored ${restored} queued message${restored > 1 ? "s" : ""} to editor`);
+			this.ctx.showStatus(`Restored ${restored} ${noun} message${restored > 1 ? "s" : ""} to editor`);
 		}
 	}
 
@@ -1371,24 +1377,42 @@ export class InputController {
 		}
 	}
 
-	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
+	restoreQueuedMessagesToEditor(options?: {
+		abort?: boolean;
+		currentText?: string;
+		queue?: "steering" | "followUp";
+	}): number {
 		this.ctx.locallySubmittedUserSignatures.clear();
 		// On Esc (abort) drop non-user internal steers so the post-abort drain can't
-		// auto-resume; plain Alt+Up dequeue preserves them for the continuing stream.
-		const { steering, followUp } = this.ctx.session.clearQueue({ forInterrupt: options?.abort });
+		// auto-resume; a plain dequeue preserves them for the continuing stream.
+		const wantSteering = options?.queue !== "followUp";
+		const wantFollowUp = options?.queue !== "steering";
+		const { steering, followUp } = this.ctx.session.clearQueue({
+			forInterrupt: options?.abort,
+			only: options?.queue,
+		});
 		// Messages typed while compacting live in `compactionQueuedMessages`, not the
 		// agent queue `clearQueue()` drains — but the pending bar shows the same
-		// "Alt+Up to edit" hint for them (ui-helpers `updatePendingMessagesDisplay`).
+		// "to edit" hint for them (ui-helpers `updatePendingMessagesDisplay`).
 		// Drain them here too so the dequeue restores every message the hint
 		// advertises; otherwise a skill/text queued during compaction is stranded and
-		// Alt+Up reports "No queued messages to restore".
+		// the dequeue reports "No <queue> messages to restore".
 		const compactionQueued = this.ctx.compactionQueuedMessages;
-		this.ctx.compactionQueuedMessages = [];
+		// Retain the half this dequeue did not claim; a steering dequeue must not
+		// swallow follow-ups typed during compaction. Note the literals differ:
+		// compaction entries use `"steer"`, the queue selector uses `"steering"`.
+		this.ctx.compactionQueuedMessages = compactionQueued.filter(entry =>
+			entry.mode === "steer" ? !wantSteering : !wantFollowUp,
+		);
 		const allQueued = [
-			...steering,
-			...compactionQueued.filter(e => e.mode === "steer").map(e => ({ text: e.text, images: e.images })),
-			...followUp,
-			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
+			...(wantSteering ? steering : []),
+			...(wantSteering
+				? compactionQueued.filter(e => e.mode === "steer").map(e => ({ text: e.text, images: e.images }))
+				: []),
+			...(wantFollowUp ? followUp : []),
+			...(wantFollowUp
+				? compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images }))
+				: []),
 		];
 		if (allQueued.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();

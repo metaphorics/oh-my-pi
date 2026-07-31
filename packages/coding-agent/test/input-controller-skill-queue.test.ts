@@ -662,7 +662,7 @@ function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
 		viewSession: session,
 		compactionQueuedMessages: [],
 		keybindings: {
-			getDisplayString: (_action: string) => "Alt+Up",
+			getDisplayString: (action: string) => (action === "app.message.dequeueFollowUp" ? "Ctrl+Shift+Up" : "Alt+Up"),
 		},
 		updatePendingMessagesDisplay,
 		locallySubmittedUserSignatures: new Set<string>(),
@@ -746,6 +746,32 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 		expect(rendered).toContain("2. run tests");
 		expect(rendered).toContain("3. summarize");
 		expect(rendered).not.toContain("Follow-up:");
+	});
+
+	it("labels each pending group with its own dequeue key", async () => {
+		fixture = await createRealSession();
+		const { session } = fixture;
+		queueUserSteer(session, "steer me");
+		session.agent.followUp({
+			role: "user",
+			content: "later please",
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+
+		const { ctx, pendingMessagesContainer } = createStubInteractiveModeContextForUiHelpers(session);
+		new UiHelpers(ctx).updatePendingMessagesDisplay();
+
+		const lines = Bun.stripANSI(pendingMessagesContainer.render(120).join("\n")).split("\n");
+		const steeringHeading = lines.find(line => line.includes("Steering · 1"));
+		const followUpHeading = lines.find(line => line.includes("After yield · 1"));
+
+		// Each group advertises only the key that restores it, so neither key can
+		// answer "no messages to restore".
+		expect(steeringHeading).toContain("Alt+Up to edit");
+		expect(steeringHeading).not.toContain("Ctrl+Shift+Up");
+		expect(followUpHeading).toContain("Ctrl+Shift+Up to edit");
+		expect(followUpHeading).not.toContain("Alt+Up to edit");
 	});
 
 	it("restores the compact slash form into the editor and clears the queue", async () => {

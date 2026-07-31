@@ -23,6 +23,8 @@ type FakeEditor = {
 	onToggleThinking?: () => void;
 	onExternalEditor?: () => void;
 	onRetry?: () => void;
+	onDequeue?: () => void;
+	onDequeueFollowUp?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
@@ -85,6 +87,18 @@ async function createContext() {
 	const prompt = vi.fn(async () => {});
 	const retry = vi.fn(async () => true);
 	const abort = vi.fn(async () => {});
+	// Mutable agent-queue fixtures backing the fake `clearQueue`. The test seeds
+	// them; `clearQueue` drains (empties) the claimed side and leaves the other.
+	const steeringQueue: { text: string; images?: ImageContent[] }[] = [];
+	const followUpQueue: { text: string; images?: ImageContent[] }[] = [];
+	const clearQueue = vi.fn((options?: { forInterrupt?: boolean; only?: "steering" | "followUp" }) => {
+		const takeSteering = options?.only !== "followUp";
+		const takeFollowUp = options?.only !== "steering";
+		const steering = takeSteering ? steeringQueue.splice(0) : [];
+		const followUp = takeFollowUp ? followUpQueue.splice(0) : [];
+		return { steering, followUp };
+	});
+
 	const session = {
 		isStreaming: false,
 		isCompacting: false,
@@ -96,6 +110,7 @@ async function createContext() {
 		queuedMessageCount: 0,
 		abort,
 		retry,
+		clearQueue,
 	};
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBtwBranchKey = vi.fn(async () => true);
@@ -183,6 +198,7 @@ async function createContext() {
 			}
 		},
 		updatePendingMessagesDisplay,
+		compactionQueuedMessages: [] as Array<{ text: string; mode: "steer" | "followUp"; images?: ImageContent[] }>,
 		isBashMode: false,
 		isPythonMode: false,
 		handleHotkeysCommand: vi.fn(),
@@ -211,6 +227,8 @@ async function createContext() {
 		ctx,
 		editor,
 		customHandlers,
+		steeringQueue,
+		followUpQueue,
 		setFocused(target: unknown) {
 			focused = target;
 		},
@@ -230,6 +248,7 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			clearQueue,
 		},
 	};
 }
@@ -613,5 +632,53 @@ describe("InputController keybinding setup", () => {
 				userInitiated: true,
 			});
 		}
+	});
+	it("restores only the follow-up queue, then the steering queue, on a split dequeue", async () => {
+		const { InputController, ctx, editor, steeringQueue, followUpQueue } = await createContext();
+		steeringQueue.push({ text: "steer one" });
+		followUpQueue.push({ text: "follow one" });
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		expect(editor.onDequeue).toBeDefined();
+		expect(editor.onDequeueFollowUp).toBeDefined();
+
+		// Follow-up dequeue claims only the follow-up message; the steering
+		// message stays queued for a later dequeue.
+		editor.onDequeueFollowUp?.();
+		expect(editor.getText()).toContain("follow one");
+		expect(editor.getText()).not.toContain("steer one");
+		expect(steeringQueue).toHaveLength(1);
+
+		// Steering dequeue then restores the remaining steering message.
+		editor.onDequeue?.();
+		expect(editor.getText()).toContain("steer one");
+	});
+
+	it("drains only the matching compaction half on a steering dequeue and all of it on Esc", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const seedCompaction = () => {
+			ctx.compactionQueuedMessages = [
+				{ text: "c-steer", mode: "steer" },
+				{ text: "c-follow", mode: "followUp" },
+			];
+		};
+		seedCompaction();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		// A steering dequeue claims the steer entry and leaves the follow-up
+		// entry behind — the retention filter is the easy part to get backwards.
+		editor.onDequeue?.();
+		expect(editor.getText()).toContain("c-steer");
+		expect(editor.getText()).not.toContain("c-follow");
+		expect(ctx.compactionQueuedMessages).toHaveLength(1);
+		expect(ctx.compactionQueuedMessages[0]?.text).toBe("c-follow");
+
+		// Esc-style restore (no `queue`) drains every compaction half.
+		editor.setText("");
+		seedCompaction();
+		controller.restoreQueuedMessagesToEditor({ abort: true });
+		expect(ctx.compactionQueuedMessages).toHaveLength(0);
 	});
 });
