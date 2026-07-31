@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { getDefaultPasteImageKeys, KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import {
+	formatKeyHint,
+	formatKeyHints,
+	getDefaultPasteImageKeys,
+	KeybindingsManager,
+} from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { keyText } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
 import { getKeybindings, setKeybindings, type KeybindingsManager as TuiKeybindingsManager } from "@oh-my-pi/pi-tui";
 
@@ -61,5 +66,23 @@ describe("getDefaultPasteImageKeys", () => {
 	it("adds the macOS Command key event to Ctrl+V for image paste", () => {
 		expect(getDefaultPasteImageKeys("linux")).toEqual(["ctrl+v"]);
 		expect(getDefaultPasteImageKeys("darwin")).toEqual(["ctrl+v", "super+v"]);
+	});
+});
+
+describe("formatKeyHint / formatKeyHints (Mac glyphs on darwin)", () => {
+	it("renders a multi-binding list with Mac glyphs and the existing separator", () => {
+		expect(formatKeyHints(["alt+up", "shift+up"], "darwin")).toBe("⌥↑/⇧↑");
+	});
+
+	it("renders ctrl+shift+up as ⇧⌘↑ on darwin (ctrl maps to ⌘, ⇧ precedes ⌘)", () => {
+		expect(formatKeyHint("ctrl+shift+up", "darwin")).toBe("⇧⌘↑");
+	});
+
+	it("keeps the non-darwin rendering unchanged", () => {
+		expect(formatKeyHint("ctrl+shift+up", "linux")).toBe("Ctrl+Shift+Up");
+	});
+
+	it("dedupes ctrl and super to a single ⌘ glyph on darwin", () => {
+		expect(formatKeyHint("ctrl+super+o", "darwin")).toBe("⌘O");
 	});
 });

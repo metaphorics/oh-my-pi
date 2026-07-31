@@ -675,13 +675,48 @@ function formatKeyPart(part: string): string {
 	return `${part.charAt(0).toUpperCase()}${part.slice(1)}`;
 }
 
-export function formatKeyHint(key: KeyId): string {
+const MAC_MODIFIER_GLYPHS: Record<string, string> = { ctrl: "⌘", super: "⌘", shift: "⇧", alt: "⌥" };
+
+const MAC_KEY_GLYPHS: Record<string, string> = {
+	up: "↑",
+	down: "↓",
+	left: "←",
+	right: "→",
+	enter: "↩",
+	return: "↩",
+	escape: "⎋",
+	esc: "⎋",
+	tab: "⇥",
+	backspace: "⌫",
+	delete: "⌦",
+	space: "␣",
+	pageup: "⇞",
+	pagedown: "⇟",
+	home: "↖",
+	end: "↘",
+};
+
+/** Mac modifier order. `⌃` is absent by design: ctrl renders as ⌘, because the
+ *  `super` alias in `addKeyAliases` makes Command the reachable modifier on darwin. */
+const MAC_GLYPH_ORDER = ["⌥", "⇧", "⌘"];
+
+function formatKeyHintMac(key: KeyId): string {
+	const parts = key.split("+");
+	const base = parts[parts.length - 1] ?? "";
+	const glyphs = parts.slice(0, -1).map(part => MAC_MODIFIER_GLYPHS[part.toLowerCase()]);
+	const ordered = MAC_GLYPH_ORDER.filter(glyph => glyphs.includes(glyph));
+	const baseLabel = MAC_KEY_GLYPHS[base.toLowerCase()] ?? formatKeyPart(base);
+	return `${ordered.join("")}${baseLabel}`;
+}
+
+export function formatKeyHint(key: KeyId, platform: NodeJS.Platform = process.platform): string {
+	if (platform === "darwin") return formatKeyHintMac(key);
 	return key.split("+").map(formatKeyPart).join("+");
 }
 
-export function formatKeyHints(keys: KeyId | KeyId[]): string {
+export function formatKeyHints(keys: KeyId | KeyId[], platform: NodeJS.Platform = process.platform): string {
 	const list = Array.isArray(keys) ? keys : [keys];
-	return list.map(formatKeyHint).join("/");
+	return list.map(key => formatKeyHint(key, platform)).join("/");
 }
 
 export type { Keybinding, KeybindingsConfig, KeyId };
