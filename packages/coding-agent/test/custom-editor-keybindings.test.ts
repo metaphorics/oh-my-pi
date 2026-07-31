@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
@@ -43,5 +44,14 @@ describe("CustomEditor keybindings", () => {
 
 		expect(onCopyPrompt).toHaveBeenCalledTimes(1);
 		expect(onRetry).not.toHaveBeenCalled();
+	});
+});
+
+describe("shipped dequeue defaults", () => {
+	it("binds both alt+up and shift+up to the steering dequeue", () => {
+		const keybindings = KeybindingsManager.inMemory();
+		const keys = keybindings.getKeys("app.message.dequeue");
+		expect(keys).toContain("alt+up");
+		expect(keys).toContain("shift+up");
 	});
 });

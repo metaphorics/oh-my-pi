@@ -139,7 +139,9 @@ export const KEYBINDINGS = {
 		description: "Retry last failed assistant turn",
 	},
 	"app.message.dequeue": {
-		defaultKeys: "alt+up",
+		// Shift+Up is listed alongside Alt+Up because macOS Terminal.app consumes Option
+		// for character composition, leaving Alt+Up unreachable there.
+		defaultKeys: ["alt+up", "shift+up"],
 		description: "Dequeue message",
 	},
 	"app.clipboard.pasteImage": {
