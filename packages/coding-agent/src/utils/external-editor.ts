@@ -7,6 +7,60 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $env, Snowflake } from "@oh-my-pi/pi-utils";
 
+export function tokenizeEditorCommand(command: string): string[] {
+	const isWindows = process.platform === "win32";
+	const tokens: string[] = [];
+	let token = "";
+	let inSingle = false;
+	let inDouble = false;
+
+	const pushToken = () => {
+		if (token.length > 0) {
+			tokens.push(token);
+			token = "";
+		}
+	};
+
+	for (let i = 0; i < command.length; i++) {
+		const character = command[i];
+		if (inSingle) {
+			if (character === "'") inSingle = false;
+			else token += character;
+			continue;
+		}
+		if (inDouble) {
+			if (character === '"') {
+				inDouble = false;
+			} else if (!isWindows && character === "\\" && i + 1 < command.length && command[i + 1] === '"') {
+				token += '"';
+				i++;
+			} else {
+				token += character;
+			}
+			continue;
+		}
+		if (!isWindows && character === "'") {
+			inSingle = true;
+		} else if (character === '"') {
+			inDouble = true;
+		} else if (!isWindows && character === "\\" && i + 1 < command.length) {
+			token += command[++i];
+		} else if (character === " " || character === "\t") {
+			pushToken();
+		} else {
+			token += character;
+		}
+	}
+
+	if (inSingle || inDouble) throw new Error("Editor command has an unterminated quote");
+	pushToken();
+	return tokens;
+}
+
+function quoteWindowsShellArgument(argument: string): string {
+	return `"${argument.replaceAll('"', '\\"')}"`;
+}
+
 /**
  * Returns the user's preferred editor command, or a platform default.
  *
@@ -51,10 +105,16 @@ export async function openInEditor(
 	try {
 		await Bun.write(tmpFile, content);
 
-		const [editor, ...editorArgs] = editorCmd.split(" ");
+		const [editor, ...editorArgs] = tokenizeEditorCommand(editorCmd);
+		if (!editor) throw new Error("Editor command is empty");
 		const stdio = options?.stdio ?? ["inherit", "inherit", "inherit"];
+		const commandArgs = [...editorArgs, tmpFile];
+		const spawnArgs = process.platform === "win32" ? commandArgs.map(quoteWindowsShellArgument) : commandArgs;
 
-		const child = spawn(editor, [...editorArgs, tmpFile], { stdio, shell: process.platform === "win32" });
+		const child = spawn(process.platform === "win32" ? quoteWindowsShellArgument(editor) : editor, spawnArgs, {
+			stdio,
+			shell: process.platform === "win32",
+		});
 		const { promise, reject, resolve } = Promise.withResolvers<number>();
 		child.once("exit", (code, signal) => resolve(code ?? (signal ? -1 : 0)));
 		child.once("error", error => reject(error));
@@ -65,7 +125,7 @@ export async function openInEditor(
 			if (options?.trimTrailingNewline === false) {
 				return text;
 			}
-			return text.replace(/\n$/, "");
+			return text.replace(/\r?\n$/, "");
 		}
 		return null;
 	} finally {

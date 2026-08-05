@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows external-editor launches for quoted commands, spaced paths, and CRLF output.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
