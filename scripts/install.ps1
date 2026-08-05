@@ -84,6 +84,36 @@ function Test-GitLfsInstalled {
     }
 }
 
+function ConvertTo-SettingsHashtable {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $result = @{}
+        foreach ($key in $Value.Keys) {
+            $result[$key] = ConvertTo-SettingsHashtable $Value[$key]
+        }
+        return $result
+    }
+    if ($Value -is [System.Array]) {
+        $result = @()
+        foreach ($item in $Value) {
+            $result += ConvertTo-SettingsHashtable $item
+        }
+        return $result
+    }
+    if ($Value -is [pscustomobject]) {
+        $result = @{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $result[$property.Name] = ConvertTo-SettingsHashtable $property.Value
+        }
+        return $result
+    }
+    return $Value
+}
+
 function Find-BashShell {
     # Check Git Bash first (most common on Windows)
     $gitBash = "C:\Program Files\Git\bin\bash.exe"
@@ -104,11 +134,20 @@ function Configure-BashShell {
     try {
         $settingsDir = Join-Path $env:USERPROFILE ".omp\agent"
         $settingsFile = Join-Path $settingsDir "settings.json"
+        $configFile = Join-Path $settingsDir "config.yml"
+        if (-not (Test-Path $configFile -PathType Leaf)) {
+            $configFile = Join-Path $settingsDir "config.yaml"
+        }
 
-        # Check if settings.json already has a shellPath configured
-        if (Test-Path $settingsFile) {
+        if (Test-Path $configFile -PathType Leaf) {
+            $configContent = [System.IO.File]::ReadAllText($configFile)
+            if ($configContent -match '(?m)^shellPath\s*:') {
+                Write-Host "Bash shell already configured in $configFile" -ForegroundColor Cyan
+                return
+            }
+        } elseif (Test-Path $settingsFile -PathType Leaf) {
             try {
-                $existingSettings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+                $existingSettings = [System.IO.File]::ReadAllText($settingsFile) | ConvertFrom-Json
                 if ($existingSettings.shellPath) {
                     Write-Host "Bash shell already configured: $($existingSettings.shellPath)" -ForegroundColor Cyan
                     return
@@ -128,21 +167,44 @@ function Configure-BashShell {
                 New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
             }
 
-            # Read existing settings or create new
-            $settings = @{}
-            if (Test-Path $settingsFile) {
+            if (Test-Path $configFile -PathType Leaf) {
+                $configBytes = [System.IO.File]::ReadAllBytes($configFile)
+                $configNewline = "`r`n"
+                if ($configBytes.Length -gt 0 -and $configBytes[$configBytes.Length - 1] -eq 10) {
+                    if (-not ($configBytes.Length -gt 1 -and $configBytes[$configBytes.Length - 2] -eq 13)) {
+                        $configNewline = "`n"
+                    }
+                }
+                $configAppend = ""
+                if ($configBytes.Length -gt 0 -and $configBytes[$configBytes.Length - 1] -ne 10) {
+                    $configAppend += $configNewline
+                }
+                $escapedBashPath = $bashPath.Replace("\", "\\").Replace('"', '\"')
+                $configAppend += "shellPath: `"$escapedBashPath`"$configNewline"
+                $appendBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($configAppend)
+                $stream = [System.IO.File]::Open($configFile, [System.IO.FileMode]::Append)
                 try {
-                    $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json -AsHashtable
+                    $stream.Write($appendBytes, 0, $appendBytes.Length)
+                } finally {
+                    $stream.Dispose()
+                }
+                Write-Host "✓ Configured shell path in $configFile" -ForegroundColor Green
+                return
+            }
+
+            $settings = @{}
+            if (Test-Path $settingsFile -PathType Leaf) {
+                try {
+                    $settings = ConvertTo-SettingsHashtable ([System.IO.File]::ReadAllText($settingsFile) | ConvertFrom-Json)
                 } catch {
                     $settings = @{}
                 }
             }
-
-            # Set shellPath
             $settings["shellPath"] = $bashPath
 
-            # Write settings
-            $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
+            $json = $settings | ConvertTo-Json -Depth 10
+            $utf8 = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($settingsFile, $json + [Environment]::NewLine, $utf8)
             Write-Host "✓ Configured shell path in $settingsFile" -ForegroundColor Green
         } else {
             Write-Host ""
@@ -150,8 +212,13 @@ function Configure-BashShell {
             Write-Host "  For shell snapshots and interactive terminals, install Git for Windows:" -ForegroundColor Cyan
             Write-Host "    https://git-scm.com/download/win" -ForegroundColor Cyan
             Write-Host "  Or set a custom path in:" -ForegroundColor Cyan
-            Write-Host "    $settingsFile" -ForegroundColor Cyan
-            Write-Host '    { "shellPath": "C:\\path\\to\\bash.exe" }' -ForegroundColor Cyan
+            if (Test-Path $configFile -PathType Leaf) {
+                Write-Host "    $configFile" -ForegroundColor Cyan
+                Write-Host '    shellPath: "C:\\path\\to\\bash.exe"' -ForegroundColor Cyan
+            } else {
+                Write-Host "    $settingsFile" -ForegroundColor Cyan
+                Write-Host '    { "shellPath": "C:\\path\\to\\bash.exe" }' -ForegroundColor Cyan
+            }
         }
     } catch {
         Write-Host "⚠ Could not configure bash shell: $_" -ForegroundColor Yellow
