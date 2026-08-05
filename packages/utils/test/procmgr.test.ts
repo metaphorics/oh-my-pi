@@ -57,6 +57,32 @@ describe("resolveWindowsShell", () => {
 		expect(resolveWindowsShell({ ProgramFiles: programFiles, ComSpec: "C:\\Windows\\System32\\cmd.exe" })).toBe(bash);
 	});
 
+	it("skips WSL bash launchers on PATH and falls back to ComSpec", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-wsl-root-"));
+		tempDirs.push(root);
+		const system32 = path.join(root, "System32");
+		fs.mkdirSync(system32, { recursive: true });
+		fs.writeFileSync(path.join(system32, "bash.exe"), "");
+		fs.chmodSync(path.join(system32, "bash.exe"), 0o755);
+		expect(
+			resolveWindowsShell({
+				SystemRoot: root,
+				PATH: system32,
+				ComSpec: path.join(root, "cmd.exe"),
+			}),
+		).toBe(path.join(root, "cmd.exe"));
+	});
+
+	it("keeps legitimate bash binaries on PATH", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-real-bash-"));
+		tempDirs.push(root);
+		fs.writeFileSync(path.join(root, "bash.exe"), "");
+		fs.chmodSync(path.join(root, "bash.exe"), 0o755);
+		expect(resolveWindowsShell({ SystemRoot: path.join(root, "windows"), PATH: root })).toBe(
+			path.join(root, "bash.exe"),
+		);
+	});
+
 	// On a real Windows host bash.exe/sh.exe may resolve from PATH before the
 	// cmd.exe fallback is reached, so the fallback contract is only
 	// deterministic off-Windows.

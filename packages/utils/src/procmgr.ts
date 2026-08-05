@@ -121,7 +121,8 @@ export function resolveBasicShell(): string | undefined {
  * 1. Git for Windows install roots (machine + per-user installers)
  * 2. scoop installs — scoop's git manifest sets GIT_INSTALL_ROOT and shims
  *    sh.exe/git.exe but never bash.exe, so PATH lookup alone misses it
- * 3. bash.exe on PATH (Cygwin, MSYS2, ...)
+ * 3. bash.exe on PATH (Cygwin, MSYS2, ...), except the System32/Sysnative
+ *    WSL launcher, which is not a real bash shell
  * 4. sh.exe on PATH (Git for Windows' sh.exe is bash; prefer a sibling
  *    bash.exe when present)
  * 5. cmd.exe from ComSpec
@@ -143,10 +144,16 @@ export function resolveWindowsShell(env: Record<string, string | undefined> = Bu
 		if (fs.existsSync(candidate)) return candidate;
 	}
 
-	const bashOnPath = $which("bash.exe");
-	if (bashOnPath) return bashOnPath;
+	const whichOptions = { PATH: env.PATH };
+	const systemRoot = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
+	const wslBashPaths = new Set([
+		path.normalize(path.join(systemRoot, "System32", "bash.exe")).toLowerCase(),
+		path.normalize(path.join(systemRoot, "Sysnative", "bash.exe")).toLowerCase(),
+	]);
+	const bashOnPath = $which("bash.exe", whichOptions);
+	if (bashOnPath && !wslBashPaths.has(path.normalize(bashOnPath).toLowerCase())) return bashOnPath;
 
-	const shOnPath = $which("sh.exe");
+	const shOnPath = $which("sh.exe", whichOptions);
 	if (shOnPath) {
 		const siblingBash = path.join(path.dirname(shOnPath), "bash.exe");
 		return fs.existsSync(siblingBash) ? siblingBash : shOnPath;

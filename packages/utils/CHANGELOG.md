@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Skip the Windows WSL `bash.exe` launcher when resolving the interactive shell, allowing Git Bash, `sh.exe`, or `cmd.exe` to be selected instead.
+
 ## [17.2.9] - 2026-08-05
 
 ### Added
