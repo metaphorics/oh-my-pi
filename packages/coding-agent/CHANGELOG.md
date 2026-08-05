@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed full-file writes converting existing files to a different line-ending style.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

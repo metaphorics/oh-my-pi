@@ -15,7 +15,8 @@ import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
-import { normalizeToLF } from "../edit/normalize";
+import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/normalize";
+import { isNotebookPath } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import { parseInternalUrl } from "../internal-urls/parse";
@@ -99,6 +100,7 @@ import {
 
 const LOOSE_HASHLINE_HEADER_RE = /^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$/;
 const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
+const LINE_ENDING_DETECTION_PREFIX_BYTES = 64 * 1024;
 const URI_LIKE_WRITE_PATH_RE = /^([a-z][a-z0-9+.-]*):\/{1,2}(.*)$/i;
 const XD_MISSING_DELIMITER_RE = /^xd\/+(.*)$/i;
 const XD_SCHEME_NEAR_MISSES: Record<string, true> = { dx: true, xdd: true, xdt: true };
@@ -1258,16 +1260,25 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
 			// Check if file exists and is auto-generated before overwriting
-			if (await fs.exists(absolutePath)) {
+			const destinationExists = await fs.exists(absolutePath);
+			if (destinationExists) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
 
 			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
 
+			let writeContent = cleanContent;
+			if (destinationExists && !isNotebookPath(absolutePath) && cleanContent.includes("\n")) {
+				const existingPrefix = await Bun.file(absolutePath).slice(0, LINE_ENDING_DETECTION_PREFIX_BYTES).text();
+				if (existingPrefix.includes("\n")) {
+					writeContent = restoreLineEndings(normalizeToLF(cleanContent), detectLineEnding(existingPrefix));
+				}
+			}
+
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
-			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
+			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, writeContent, signal);
 			if (bridgeWrite) {
 				// `write` always replaces the whole file, so (unlike hashline's
 				// hunk-scoped diff) there's no size cost to keying the header/
@@ -1292,7 +1303,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			const diagnostics = await this.#writethrough(
 				absolutePath,
-				cleanContent,
+				writeContent,
 				signal,
 				undefined,
 				batchRequest,
@@ -1302,10 +1313,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (!this.#deferredDiagnostics || batchRequest?.flush === false) {
 				this.session.bumpFileMutationVersion?.(absolutePath);
 			}
-			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, cleanContent);
+			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, writeContent);
 
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
-			const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
+			const header = maybeWriteSnapshotHeader(this.session, absolutePath, writeContent);
+			const writeLine = `Successfully wrote ${writeContent.length} bytes to ${displayPath}`;
 			let resultText = header ? `${header}\n${writeLine}` : writeLine;
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
