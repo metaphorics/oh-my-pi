@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added PowerShell completion generation for `omp` and `omp.exe`, including static, dynamic, file, directory, and comma-separated value completion.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

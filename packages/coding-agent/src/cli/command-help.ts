@@ -29,7 +29,7 @@ export const cleanseHelp = {
 export const commitHelp = { description: "Generate a commit message and update changelogs" } satisfies CommandMetadata;
 
 export const completionsHelp = {
-	description: "Print a shell completion script (bash, zsh, or fish)",
+	description: "Print a shell completion script (bash, zsh, fish, or PowerShell)",
 } satisfies CommandMetadata;
 
 export const completeHelp = { hidden: true } satisfies CommandMetadata;

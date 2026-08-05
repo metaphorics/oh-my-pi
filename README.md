@@ -70,7 +70,7 @@ macOS · Linux · Windows · bun ≥ 1.3.14
 
 ### Shell completions
 
-`omp` generates its own completion scripts for **bash**, **zsh**, and **fish** from the live command/flag metadata, so they never drift from the actual CLI. Subcommands, flags, and enum values complete statically; model names (`--model`, `--smol`, `--slow`, `--plan`) resolve against the bundled model catalog and `--resume` against your on-disk sessions.
+`omp` generates its own completion scripts for **bash**, **zsh**, **fish**, and **PowerShell** from the live command/flag metadata, so they never drift from the actual CLI. Subcommands, flags, and enum values complete statically; model names (`--model`, `--smol`, `--slow`, `--plan`) resolve against the bundled model catalog and `--resume` against your on-disk sessions.
 
 ```sh
 # zsh — add to ~/.zshrc (or write the output into a file on your $fpath)
@@ -81,6 +81,9 @@ eval "$(omp completions bash)"
 
 # fish
 omp completions fish > ~/.config/fish/completions/omp.fish
+
+# PowerShell (add to $PROFILE)
+omp completions powershell | Out-String | Invoke-Expression
 ```
 
 ## Every tool, _benchmaxxed_.

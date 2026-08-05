@@ -136,6 +136,29 @@ describe("generateCompletion — fish", () => {
 	});
 });
 
+describe("generateCompletion — PowerShell", () => {
+	const out = generateCompletion("powershell", spec);
+
+	it("emits structured command and flag metadata", () => {
+		expect(out).toContain("@{ Name = 'worktree'; Aliases = @('wt'); Description = 'Worktrees';");
+		expect(out).toContain(
+			"@{ Names = @('--thinking'); Description = 'Effort'; Kind = 'enum'; Values = @('low', 'high') }",
+		);
+		expect(out).toContain(
+			"@{ Names = @('--tools'); Description = 'Tools'; Kind = 'list'; Values = @('read', 'bash') }",
+		);
+		expect(out).toContain("@{ Names = @('--session-dir'); Description = 'Dir'; Kind = 'dir' }");
+	});
+
+	it("maps dynamic values and positional aliases", () => {
+		expect(out).toContain("@{ Names = @('--model'); Description = 'Model to use'; Kind = 'models' }");
+		expect(out).toContain("@{ Names = @('--models'); Description = 'Model list'; Kind = 'models-multiple' }");
+		expect(out).toContain("@{ Names = @('--resume', '-r'); Description = 'Resume'; Kind = 'sessions' }");
+		expect(out).toContain("@{ Description = 'Action'; Kind = 'enum'; Values = @('list', 'clear') }");
+		expect(out).toContain("Register-ArgumentCompleter -Native -CommandName @('omp', 'omp.exe')");
+	});
+});
+
 describe("buildSpec", () => {
 	function fakeCmd(props: Partial<CommandCtor>): CommandCtor {
 		return props as unknown as CommandCtor;
