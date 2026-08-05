@@ -84,20 +84,83 @@ function Test-GitLfsInstalled {
     }
 }
 
-function Find-BashShell {
-    # Check Git Bash first (most common on Windows)
-    $gitBash = "C:\Program Files\Git\bin\bash.exe"
-    if (Test-Path $gitBash) {
-        return $gitBash
+function Test-BashCandidate {
+    param([string]$Candidate)
+
+    if (-not $Candidate -or -not (Test-Path $Candidate -PathType Leaf)) {
+        return $false
     }
 
-    # Check bash.exe on PATH (Cygwin, MSYS2, WSL)
+    $systemRoot = $env:SystemRoot
+    if (-not $systemRoot) {
+        $systemRoot = $env:SYSTEMROOT
+    }
+    if (-not $systemRoot) {
+        $systemRoot = "C:\Windows"
+    }
+
+    # System32\bash.exe and Sysnative\bash.exe are WSL launchers, not Git Bash.
+    $systemBash = Join-Path (Join-Path $systemRoot "System32") "bash.exe"
+    $sysnativeBash = Join-Path (Join-Path $systemRoot "Sysnative") "bash.exe"
+    if (
+        $Candidate.Equals($systemBash, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $Candidate.Equals($sysnativeBash, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        return $false
+    }
+
+    return $true
+}
+
+function Find-BashShell {
+    $gitRoots = @()
+    if ($env:ProgramFiles) {
+        $gitRoots += (Join-Path $env:ProgramFiles "Git")
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $gitRoots += (Join-Path ${env:ProgramFiles(x86)} "Git")
+    }
+    if ($env:LOCALAPPDATA) {
+        $gitRoots += (Join-Path (Join-Path $env:LOCALAPPDATA "Programs") "Git")
+    }
+    if ($env:GIT_INSTALL_ROOT) {
+        $gitRoots += $env:GIT_INSTALL_ROOT
+    }
+    if ($env:SCOOP) {
+        $gitRoots += (Join-Path (Join-Path (Join-Path $env:SCOOP "apps") "git") "current")
+    }
+    if ($env:USERPROFILE) {
+        $gitRoots += (Join-Path (Join-Path (Join-Path $env:USERPROFILE "scoop") "apps") "git\current")
+    }
+
+    foreach ($root in $gitRoots) {
+        $candidate = Join-Path (Join-Path $root "bin") "bash.exe"
+        if (Test-BashCandidate $candidate) {
+            return $candidate
+        }
+    }
+
     try {
         $bashCmd = Get-Command bash.exe -ErrorAction Stop
-        return $bashCmd.Source
+        if (Test-BashCandidate $bashCmd.Source) {
+            return $bashCmd.Source
+        }
     } catch {
-        return $null
     }
+
+    try {
+        $shCmd = Get-Command sh.exe -ErrorAction Stop
+        $siblingBash = Join-Path (Split-Path $shCmd.Source -Parent) "bash.exe"
+        if (Test-BashCandidate $siblingBash) {
+            return $siblingBash
+        }
+        if (Test-BashCandidate $shCmd.Source) {
+            return $shCmd.Source
+        }
+    } catch {
+    }
+
+    return $null
 }
 
 function Configure-BashShell {
