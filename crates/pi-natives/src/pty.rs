@@ -40,7 +40,7 @@ pub struct PtyStartOptions<'env> {
 	/// PTY row count.
 	pub rows:       Option<u16>,
 	/// Shell binary to use (e.g. "sh", "bash", or an absolute path).
-	/// Defaults to "sh" if not provided.
+	/// Defaults to `%ComSpec%` (or `cmd.exe`) on Windows and `sh` elsewhere.
 	pub shell:      Option<String>,
 }
 
@@ -89,6 +89,64 @@ struct PtyRunConfig {
 	env:     Option<HashMap<String, String>>,
 	cols:    u16,
 	rows:    u16,
+}
+
+fn resolve_shell(shell: Option<&str>) -> String {
+	if let Some(shell) = shell {
+		return shell.to_owned();
+	}
+
+	#[cfg(windows)]
+	{
+		return std::env::var("ComSpec")
+			.or_else(|_| std::env::var("COMSPEC"))
+			.unwrap_or_else(|_| "cmd.exe".to_owned());
+	}
+
+	#[cfg(not(windows))]
+	{
+		"sh".to_owned()
+	}
+}
+
+fn shell_args(shell: &str, command: String) -> Vec<String> {
+	let lower = shell.to_lowercase();
+	let prefix = if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
+		"/c"
+	} else if lower.contains("powershell") || lower.contains("pwsh") {
+		"-Command"
+	} else {
+		"-lc"
+	};
+	vec![prefix.to_owned(), command]
+}
+
+#[cfg(test)]
+mod shell_tests {
+	use super::{resolve_shell, shell_args};
+
+	#[cfg(windows)]
+	#[test]
+	fn default_shell_uses_comspec_and_cmd_arguments() {
+		let shell = resolve_shell(None);
+		assert!(shell.to_ascii_lowercase().ends_with("cmd.exe"));
+		assert_eq!(shell_args(&shell, "echo ok".to_owned()), vec!["/c", "echo ok"]);
+	}
+
+	#[cfg(not(windows))]
+	#[test]
+	fn default_shell_uses_sh_and_login_arguments() {
+		assert_eq!(resolve_shell(None), "sh");
+		assert_eq!(shell_args("sh", "echo ok".to_owned()), vec!["-lc", "echo ok"]);
+	}
+
+	#[test]
+	fn explicit_shell_keeps_existing_argument_conventions() {
+		assert_eq!(resolve_shell(Some("powershell.exe")), "powershell.exe");
+		assert_eq!(shell_args("powershell.exe", "Get-Date".to_owned()), vec!["-Command", "Get-Date"],);
+		assert_eq!(shell_args("cmd.exe", "echo ok".to_owned()), vec!["/c", "echo ok"]);
+		assert_eq!(shell_args("bash.exe", "echo ok".to_owned()), vec!["-lc", "echo ok"]);
+	}
 }
 
 enum ReaderEvent {
@@ -314,17 +372,11 @@ fn run_pty_sync(
 
 	let mut cmd = match config.command {
 		PtyCommand::Shell { command, shell } => {
-			let shell = shell.as_deref().unwrap_or("sh");
-			let mut cmd = CommandBuilder::new(shell);
-			let lower = shell.to_lowercase();
-			if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
-				cmd.arg("/c");
-			} else if lower.contains("powershell") || lower.contains("pwsh") {
-				cmd.arg("-Command");
-			} else {
-				cmd.arg("-lc");
+			let shell = resolve_shell(shell.as_deref());
+			let mut cmd = CommandBuilder::new(&shell);
+			for arg in shell_args(&shell, command) {
+				cmd.arg(arg);
 			}
-			cmd.arg(command);
 			cmd
 		},
 		PtyCommand::Argv { application, args } => {

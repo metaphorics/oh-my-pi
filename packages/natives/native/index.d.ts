@@ -1662,7 +1662,7 @@ export interface PtyStartOptions {
   rows?: number
   /**
    * Shell binary to use (e.g. "sh", "bash", or an absolute path).
-   * Defaults to "sh" if not provided.
+   * Defaults to `%ComSpec%` (or "cmd.exe") on Windows and "sh" elsewhere.
    */
   shell?: string
 }
