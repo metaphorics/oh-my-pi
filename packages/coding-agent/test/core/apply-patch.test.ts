@@ -605,6 +605,14 @@ describe("parseApplyPatch (production)", () => {
 		expect(result[0].diff).toContain("-old");
 	});
 
+	test("normalizes CRLF envelope transport before parsing", () => {
+		const result = parseApplyPatch(
+			"*** Begin Patch\r\n*** Update File: a.py\r\n*** Move to: b.py\r\n@@\r\n-old\r\n+new\r\n*** End Patch\r\n",
+		);
+		expect(result[0]).toMatchObject({ path: "a.py", op: "update", rename: "b.py" });
+		expect(result[0].diff).toBe("@@\n-old\n+new");
+	});
+
 	test("zero-hunk patch returns empty array", () => {
 		expect(parseApplyPatch(wrap(""))).toEqual([]);
 	});
@@ -710,6 +718,17 @@ describe("applyCodexPatch (production)", () => {
 		expect(result.affected.deleted).toEqual([]);
 		expect(fs.existsSync(path.join(tempDir, "src.txt"))).toBe(false);
 		expect(await Bun.file(path.join(tempDir, "dst.txt")).text()).toBe("body2\n");
+	});
+
+	test("CRLF envelope updates preserve CRLF file endings", async () => {
+		const target = path.join(tempDir, "crlf.txt");
+		await Bun.write(target, "alpha\r\nbeta\r\n");
+
+		const patch =
+			"*** Begin Patch\r\n*** Update File: crlf.txt\r\n@@\r\n-alpha\r\n+ALPHA\r\n beta\r\n*** End Patch\r\n";
+		await applyCodexPatch(patch, { cwd: tempDir });
+
+		expect(await Bun.file(target).text()).toBe("ALPHA\r\nbeta\r\n");
 	});
 
 	test("partial success: earlier ops stay applied when a later op fails", async () => {

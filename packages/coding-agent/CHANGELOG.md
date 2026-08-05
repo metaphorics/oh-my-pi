@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed CRLF `apply_patch` envelopes retaining carriage returns in paths and hunk bodies.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes

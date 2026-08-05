@@ -24,6 +24,7 @@
 
 import { ParseError } from "../diff";
 import type { PatchInput } from "../modes/patch";
+import { normalizeToLF } from "../normalize";
 
 const BEGIN_PATCH_MARKER = "*** Begin Patch";
 const END_PATCH_MARKER = "*** End Patch";
@@ -54,7 +55,7 @@ export function parseApplyPatchStreaming(patchText: string): PatchInput[] {
 
 function parseApplyPatchWithOptions(patchText: string, options: ParseApplyPatchOptions): PatchInput[] {
 	const streaming = options.streaming === true;
-	let lines = patchText.trim().split("\n");
+	let lines = normalizeToLF(patchText).trim().split("\n");
 
 	// Lenient heredoc strip: <<EOF / <<'EOF' / <<"EOF" ... EOF
 	if (lines.length >= 2) {
